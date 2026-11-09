@@ -13569,7 +13569,7 @@
     };
   }
 
-  // src/exporter.ts
+  // src/blend.ts
   var VALID_PSD_BLEND_MODES = {
     "PASS_THROUGH": "pass through",
     "NORMAL": "normal",
@@ -13609,6 +13609,8 @@
     if (!isGroup && mapped === "pass through") return "normal";
     return mapped;
   }
+
+  // src/exporter.ts
   function getNodeBlendMode(node) {
     return "blendMode" in node ? node.blendMode : "NORMAL";
   }

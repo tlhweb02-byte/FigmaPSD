@@ -19,7 +19,8 @@ Figma2PSD-Pro
 │   ├── layers.ts       # 树状图层解析（绝对坐标、递归嵌套、组关系判定、类型推断）
 │   ├── text.ts         # 文本节点转换（字体预加载、PS 字体名映射、原生 TySh 文本提取）
 │   ├── image.ts        # 位图转换（无损 Uint8Array -> Base64 编码管道）
-│   └── vector.ts       # 矢量/形状节点混合模式与坐标映射
+│   ├── blend.ts        # Figma 混合模式 -> PSD 混合模式映射
+│   └── font-map.ts     # 本机字体 PS 名称与度量映射（自动生成）
 │
 ├── code.js             # 构建导出的 Figma 主线程可执行文件
 ├── ui.html             # Figma 前端 UI（内含 ag-psd PSD 合成逻辑）
