@@ -1,0 +1,31 @@
+﻿=== start 2026-08-19T10:07:50.4313075+08:00 ===
+attached to running instance, version=27.9.1
+docs open: 3
+DOC: '直接导出打标PSD666.psd' 800x800 res=72 layers=8
+  LAYER '活动价 起' kind=2 bounds=(235,710)-(252,727) | textItem size=16.8999996185303 position=(244,725) font=SourceHanSansCN-Regular contents='起'
+  LAYER '活动价 划线价' kind=2 bounds=(232,731)-(330,754) | textItem size=28 position=(281,752) font=HelveticaNowText-Bold contents='¥9999'
+  LAYER '活动价' kind=2 bounds=(68,697)-(224,742) | textItem size=58 position=(146,739) font=HelveticaNowText-Bold contents='9999'
+  LAYER '当前售价' kind=2 bounds=(460,739)-(515,762) | textItem size=30 position=(488,761) font=HelveticaNowText-Medium contents='999'
+  LAYER '时间' kind=2 bounds=(499,680)-(655,698) | textItem size=18 position=(577,696) font=SourceHanSansCN-Medium contents='活动时间：5.31 - 6.3'
+  LAYER '折扣' kind=2 bounds=(621,739)-(676,762) | textItem size=30 position=(649,761) font=HelveticaNowText-Medium contents='999'
+  LAYER '*不同配色有价格差异' kind=2 bounds=(45,781)-(196,797) | textItem size=16 position=(121,795) font=SourceHanSansCN-Regular contents='*不同配色有价格差异'
+  LAYER '图层 1' kind=1 bounds=(24,664)-(776,776)
+DOC: '直接导出打标PSD555.psd' 800x800 res=72 layers=8
+  LAYER '活动价 起' kind=2 bounds=(235,710)-(252,727) | textItem size=16.8999996185303 position=(244,725) font=SourceHanSansCN-Regular contents='起'
+  LAYER '活动价 划线价' kind=2 bounds=(232,731)-(330,754) | textItem size=28 position=(281,752) font=HelveticaNowText-Bold contents='¥9999'
+  LAYER '活动价' kind=2 bounds=(68,703)-(224,748) | textItem size=58 position=(146,745) font=HelveticaNowText-Bold contents='9999'
+  LAYER '当前售价' kind=2 bounds=(460,739)-(515,762) | textItem size=30 position=(488,761) font=HelveticaNowText-Medium contents='999'
+  LAYER '时间' kind=2 bounds=(499,680)-(655,698) | textItem size=18 position=(577,696) font=SourceHanSansCN-Medium contents='活动时间：5.31 - 6.3'
+  LAYER '折扣' kind=2 bounds=(621,739)-(676,762) | textItem size=30 position=(649,761) font=HelveticaNowText-Medium contents='999'
+  LAYER '*不同配色有价格差异' kind=2 bounds=(45,781)-(196,797) | textItem size=16 position=(121,795) font=SourceHanSansCN-Regular contents='*不同配色有价格差异'
+  LAYER '图层 1' kind=1 bounds=(24,664)-(776,776)
+DOC: '111.psd' 800x800 res=72 layers=8
+  LAYER '活动价 起' kind=2 bounds=(235,710)-(252,727) | textItem size=16.8999996185303 position=(244,725) font=SourceHanSansCN-Regular contents='起'
+  LAYER '活动价 划线价' kind=2 bounds=(232,731)-(330,754) | textItem size=28 position=(281,752) font=HelveticaNowText-Bold contents='¥9999'
+  LAYER '活动价' kind=2 bounds=(163,1404)-(279,1449) | textItem size=58 position=(144,1404) font=HelveticaNowText-Bold contents='9999'
+  LAYER '当前售价' kind=2 bounds=(460,739)-(515,762) | textItem size=30 position=(488,761) font=HelveticaNowText-Medium contents='999'
+  LAYER '时间' kind=2 bounds=(499,680)-(655,698) | textItem size=18 position=(577,696) font=SourceHanSansCN-Medium contents='活动时间：5.31 - 6.3'
+  LAYER '折扣' kind=2 bounds=(621,739)-(676,762) | textItem size=30 position=(649,761) font=HelveticaNowText-Medium contents='999'
+  LAYER '*不同配色有价格差异' kind=2 bounds=(45,781)-(196,797) | textItem size=16 position=(121,795) font=SourceHanSansCN-Regular contents='*不同配色有价格差异'
+  LAYER '图层 1' kind=1 bounds=(24,664)-(776,776)
+=== end 2026-08-19T10:07:56.5764807+08:00 ===

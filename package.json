@@ -1,0 +1,19 @@
+{
+  "name": "figma2psd-pro",
+  "version": "1.0.0",
+  "description": "Figma to PSD Pro Exporter Plugin",
+  "main": "code.js",
+  "scripts": {
+    "build": "esbuild src/code.ts --bundle --outfile=code.js --target=es2020",
+    "watch": "esbuild src/code.ts --bundle --outfile=code.js --target=es2020 --watch",
+    "build:fonts": "powershell -ExecutionPolicy Bypass -File test-env/dump-fonts.ps1 && node test-env/extract-font-names.js && node test-env/generate-font-map.js"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.80.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "ag-psd": "^31.0.2"
+  }
+}

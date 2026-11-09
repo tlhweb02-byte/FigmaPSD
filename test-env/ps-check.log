@@ -1,0 +1,11 @@
+﻿=== start 2026-08-20T13:46:56.3522781+08:00 ===
+file: C:\Users\jm038153\Desktop\鐩存帴瀵煎嚭鎵撴爣PSD.psd
+attached to running PS, version=27.9.1
+ERROR: 非法参数 - 参数 1
+- 应为相对于现有文件/文件夹的参考
+=== end 2026-08-20T13:46:56.5072705+08:00 ===
+=== start 2026-08-20T13:47:16.1649236+08:00 ===
+file: C:\Users\jm038153\Desktop\直接导出打标PSD.psd
+attached to running PS, version=27.9.1
+ERROR: 无法打开文件，因为打开选项不正确
+=== end 2026-08-20T13:47:16.7775608+08:00 ===

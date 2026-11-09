@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Figma2PSD-Pro</title>
+  <!-- 引入 ag-psd 库进行在线 PSD 打包合成（31.x 起完整支持 TySh 文本图层写入） -->
+  <script src="https://cdn.jsdelivr.net/npm/ag-psd@31.0.2/dist/bundle.js"></script>
+  <style>
+    :root {
+      --bg: var(--figma-color-bg, #ffffff);
+      --text: var(--figma-color-text, #333333);
+      --border: var(--figma-color-border, #e5e5e5);
+      --brand: var(--figma-color-bg-brand, #18a0fb);
+      --brand-hover: var(--figma-color-bg-brand-hover, #0d8de3);
+      --secondary-bg: var(--figma-color-bg-secondary, #f5f5f5);
+    }
+    
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background-color: var(--bg);
+      color: var(--text);
+      font-size: 12px;
+      box-sizing: border-box;
+      user-select: none;
+    }
+
+    h2 {
+      font-size: 14px;
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .form-group {
+      margin-bottom: 14px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+      color: #666;
+    }
+
+    select, input[type="text"] {
+      width: 100%;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      box-sizing: border-box;
+      font-size: 12px;
+      outline: none;
+    }
+
+    select:focus {
+      border-color: var(--brand);
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .row .form-group {
+      flex: 1;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      background-color: var(--brand);
+      color: white;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.2s;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn:hover {
+      background-color: var(--brand-hover);
+    }
+
+    .btn:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    .empty-state {
+      padding: 20px;
+      text-align: center;
+      background: var(--secondary-bg);
+      border-radius: 8px;
+      color: #777;
+      margin-bottom: 14px;
+    }
+
+    .progress-container {
+      margin-top: 14px;
+      display: none;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      background-color: #e0e0e0;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background-color: var(--brand);
+      transition: width 0.2s;
+    }
+
+    .status-text {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+      word-break: break-all;
+    }
+
+    .footer-tip {
+      margin-top: 16px;
+      font-size: 11px;
+      color: #888;
+      line-height: 1.4;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>🎨 Figma2PSD-Pro (纯文本图层验证版)</h2>
+
+  <div id="selection-container">
+    <div class="empty-state" id="empty-state">
+      请在 Figma 中选择需要导出的画板 (Frame / Component / Group)
+    </div>
+
+    <div class="form-group" id="artboard-select-group" style="display: none;">
+      <label for="artboard-select">目标导出画板：</label>
+      <select id="artboard-select"></select>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="form-group">
+      <label for="scale-select">导出倍率：</label>
+      <select id="scale-select">
+        <option value="1">1x (原始尺寸)</option>
+        <option value="2" selected>2x (高清)</option>
+        <option value="3">3x (超清)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="mode-select">图层结构：</label>
+      <select id="mode-select">
+        <option value="hierarchical">保持组/文件夹层级</option>
+        <option value="flat">平铺为独立图层</option>
+      </select>
+    </div>
+  </div>
+
+  <button class="btn" id="export-btn" disabled>导出 PSD 文件</button>
+
+  <div class="progress-container" id="progress-container">
+    <div class="status-text" id="status-text">准备导出...</div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+  </div>
+
+  <div class="footer-tip">
+    💡 文本图层使用原生 PSD TySh 描述符（Photoshop 中可双击编辑），并附带栅格预览像素。<br>
+    🧩 组/组件实例/画板命名以「-合并」结尾时，导出时将整组栅格化为一张位图图层（图层名自动去掉「-合并」）。
+  </div>
+
+  <script>
+    const artboardSelect = document.getElementById('artboard-select');
+    const artboardGroup = document.getElementById('artboard-select-group');
+    const emptyState = document.getElementById('empty-state');
+    const exportBtn = document.getElementById('export-btn');
+    const scaleSelect = document.getElementById('scale-select');
+    const modeSelect = document.getElementById('mode-select');
+    const progressContainer = document.getElementById('progress-container');
+    const progressFill = document.getElementById('progress-fill');
+    const statusText = document.getElementById('status-text');
+
+    let currentArtboards = [];
+
+    // 监听来自 Figma Plugin code.js 的消息
+    window.onmessage = async (event) => {
+      const msg = event.data.pluginMessage;
+      if (!msg) return;
+
+      if (msg.type === 'selection-changed') {
+        currentArtboards = msg.artboards;
+        if (msg.hasSelection && currentArtboards.length > 0) {
+          emptyState.style.display = 'none';
+          artboardGroup.style.display = 'block';
+          artboardSelect.innerHTML = '';
+          currentArtboards.forEach((ab) => {
+            const opt = document.createElement('option');
+            opt.value = ab.id;
+            opt.textContent = `${ab.name} (${ab.width}x${ab.height})`;
+            artboardSelect.appendChild(opt);
+          });
+          exportBtn.disabled = false;
+        } else {
+          emptyState.style.display = 'block';
+          artboardGroup.style.display = 'none';
+          exportBtn.disabled = true;
+        }
+      } else if (msg.type === 'status') {
+        progressContainer.style.display = 'block';
+        statusText.textContent = msg.status;
+      } else if (msg.type === 'progress') {
+        progressContainer.style.display = 'block';
+        const percent = Math.round((msg.current / msg.total) * 100);
+        progressFill.style.width = `${percent}%`;
+        statusText.textContent = `[${msg.current}/${msg.total}] 正在导出: ${msg.layerName}`;
+      } else if (msg.type === 'export-data') {
+        statusText.textContent = '正在打包合成 PSD 文件...';
+        progressFill.style.width = '95%';
+        try {
+          await generatePsdFile(msg);
+          progressFill.style.width = '100%';
+          statusText.textContent = '✅ PSD 导出成功！';
+          exportBtn.disabled = false;
+        } catch (err) {
+          console.error('合成 PSD 失败详情:', err);
+          alert('合成 PSD 失败: ' + (err.message || err));
+          statusText.textContent = '❌ 导出失败';
+          exportBtn.disabled = false;
+        }
+      } else if (msg.type === 'error') {
+        alert(msg.message);
+        progressContainer.style.display = 'none';
+        exportBtn.disabled = false;
+      }
+    };
+
+    // 触发导出按钮
+    exportBtn.addEventListener('click', () => {
+      const selectedId = artboardSelect.value;
+      if (!selectedId) return;
+
+      exportBtn.disabled = true;
+      progressContainer.style.display = 'block';
+      progressFill.style.width = '0%';
+      statusText.textContent = '准备抓取图层信息...';
+
+      parent.postMessage({
+        pluginMessage: {
+          type: 'export-psd',
+          nodeId: selectedId,
+          scale: parseFloat(scaleSelect.value),
+          exportMode: modeSelect.value
+        }
+      }, '*');
+    });
+
+    const ALLOWED_AG_PSD_MODES = new Set([
+      'normal', 'pass through', 'darken', 'multiply', 'color burn', 'linear burn',
+      'darker color', 'lighten', 'screen', 'color dodge', 'linear dodge',
+      'lighter color', 'overlay', 'soft light', 'hard light', 'vivid light',
+      'linear light', 'pin light', 'hard mix', 'difference', 'exclusion',
+      'subtract', 'divide', 'hue', 'saturation', 'color', 'luminosity'
+    ]);
+
+    function sanitizeBlendMode(blendMode, isGroup) {
+      if (!blendMode) return 'normal';
+      let mode = String(blendMode).toLowerCase().trim();
+      
+      if (mode === 'passthrough' || mode === 'pass-through') mode = 'pass through';
+      if (mode === 'colorburn' || mode === 'color-burn') mode = 'color burn';
+      if (mode === 'linearburn' || mode === 'linear-burn') mode = 'linear burn';
+      if (mode === 'darkercolor' || mode === 'darker-color') mode = 'darker color';
+      if (mode === 'colordodge' || mode === 'color-dodge') mode = 'color dodge';
+      if (mode === 'lineardodge' || mode === 'linear-dodge') mode = 'linear dodge';
+      if (mode === 'lightercolor' || mode === 'lighter-color') mode = 'lighter color';
+      if (mode === 'softlight' || mode === 'soft-light') mode = 'soft light';
+      if (mode === 'hardlight' || mode === 'hard-light') mode = 'hard light';
+      if (mode === 'vividlight' || mode === 'vivid-light') mode = 'vivid light';
+      if (mode === 'linearlight' || mode === 'linear-light') mode = 'linear light';
+      if (mode === 'pinlight' || mode === 'pin-light') mode = 'pin light';
+      if (mode === 'hardmix' || mode === 'hard-mix') mode = 'hard mix';
+
+      if (!ALLOWED_AG_PSD_MODES.has(mode)) {
+        return 'normal';
+      }
+
+      if (!isGroup && mode === 'pass through') {
+        return 'normal';
+      }
+
+      return mode;
+    }
+
+    function base64ToCanvasOnly(base64Str, layerName) {
+      return new Promise((resolve) => {
+        if (!base64Str) {
+          const emptyCanvas = document.createElement('canvas');
+          emptyCanvas.width = 1;
+          emptyCanvas.height = 1;
+          resolve({ canvas: emptyCanvas, w: 1, h: 1 });
+          return;
+        }
+
+        const img = new Image();
+        img.onload = () => {
+          const w = img.width;
+          const h = img.height;
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          resolve({ canvas: canvas, w: w, h: h });
+        };
+
+        img.onerror = (err) => {
+          const emptyCanvas = document.createElement('canvas');
+          emptyCanvas.width = 1;
+          emptyCanvas.height = 1;
+          resolve({ canvas: emptyCanvas, w: 1, h: 1 });
+        };
+
+        img.src = 'data:image/png;base64,' + base64Str;
+      });
+    }
+
+    // 检测 PNG 预览里文字的实际像素边界（ink bounds），返回相对 canvas 左上角的
+    // { top, left, right, bottom }（right/bottom 为含端点的最大坐标）。
+    // PNG 预览是 Figma 的逐像素渲染，因此 ink bottom 即文字实际底部 ——
+    // 对无 descender 的文本（数字/大写/CJK）ink bottom ≈ 基线。
+    function detectTextInk(canvas) {
+      try {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let top = h, left = w, right = -1, bottom = -1;
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const a = data[(y * w + x) * 4 + 3];
+            if (a > 0) {
+              if (y < top) top = y;
+              if (y > bottom) bottom = y;
+              if (x < left) left = x;
+              if (x > right) right = x;
+            }
+          }
+        }
+        if (bottom < 0) return null; // 全透明
+        return { top, left, right, bottom };
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function generatePsdFile(data) {
+      if (typeof agPsd === 'undefined') {
+        throw new Error('ag-psd 库未能成功加载');
+      }
+
+      const { artboardName, rootCompositePngBase64, layers, scale } = data;
+      const exportScale = (typeof scale === 'number' && scale > 0) ? scale : 1;
+
+      const { canvas: rootCanvas } = await base64ToCanvasOnly(rootCompositePngBase64, 'RootComposite');
+      const docWidth = rootCanvas.width;
+      const docHeight = rootCanvas.height;
+
+      const layerMap = new Map();
+      const rootChildren = [];
+      const positionReport = []; // 文字图层位置对比报告
+
+      for (const layer of layers) {
+        if (layer.isGroup) {
+          const groupObj = {
+            name: layer.name,
+            hidden: layer.visible === false,
+            blendMode: sanitizeBlendMode(layer.blendMode, true),
+            opened: true,
+            left: 0,
+            top: 0,
+            right: docWidth,
+            bottom: docHeight,
+            children: []
+          };
+          if (typeof layer.opacity === 'number' && layer.opacity < 0.99) {
+            groupObj.opacity = layer.opacity;
+          }
+          layerMap.set(layer.id, groupObj);
+        } else if (layer.kind === 'text' && layer.textData) {
+          const left = Math.round(layer.x);
+          const top = Math.round(layer.y);
+          const right = left + Math.round(layer.width);
+          const bottom = top + Math.round(layer.height);
+
+          const c = layer.textData.color;
+          const rVal = c.r <= 1 ? Math.round(c.r * 255) : Math.round(c.r);
+          const gVal = c.g <= 1 ? Math.round(c.g * 255) : Math.round(c.g);
+          const bVal = c.b <= 1 ? Math.round(c.b * 255) : Math.round(c.b);
+
+          // ---- 文本定位（已对照真实 PS 导出文件验证）----
+          // Photoshop 对 point 文本用 TySh transform 的平移量作为"基线原点"：
+          //   基线 y = 框顶 + 基线偏移（渲染像素）
+          // 而 TySh 描述符里的 text.left/top/right/bottom 在真实 PS 文件中全部为 0，
+          // 写入图层边界会导致 Photoshop 重新排版时产生水平偏移。
+          const fontSizePt = layer.textData.fontSize || 16; // pt，与 Figma px 数值一致
+          const fontSizeScaled = layer.textData.fontSizeScaled || (fontSizePt * exportScale); // 渲染像素字号
+          const ascentRatio = (typeof layer.textData.ascentRatio === 'number' && layer.textData.ascentRatio > 0)
+            ? layer.textData.ascentRatio
+            : 0.88;
+          const descentRatio = (typeof layer.textData.descentRatio === 'number' && layer.textData.descentRatio > 0 && layer.textData.descentRatio < 1)
+            ? layer.textData.descentRatio
+            : 0.2;
+          const shapeType = layer.textData.shapeType === 'box' ? 'box' : 'point';
+
+          // 用字体度量估算的基线（对比报告用）
+          const estimatedBaselineY = top + Math.round(fontSizeScaled * ascentRatio);
+
+          // ---- 精确基线：用 PNG 预览检测文字实际像素边界（Figma 逐像素渲染）----
+          // ink bottom 即文字实际底部：无 descender 文本（数字/大写/CJK）≈ 基线；
+          // 含 descender 文本（g j p q y）的 ink bottom = 基线 + descender 深度。
+          let textCanvas = null;
+          if (layer.pngBase64) {
+            const res = await base64ToCanvasOnly(layer.pngBase64, layer.name);
+            textCanvas = res.canvas;
+          }
+          const ink = textCanvas ? detectTextInk(textCanvas) : null;
+
+          let baselineY = estimatedBaselineY;
+          let baselineMethod = 'font-metrics';
+          if (ink && shapeType === 'point') {
+            // 判断文本是否含 descender 字符（小写 g j p q y）
+            const hasDescender = /[gjpqy]/.test(layer.textData.text || '');
+            const descenderPx = Math.round(fontSizeScaled * descentRatio);
+            // ink bottom 相对 PNG 顶部；PNG 顶部即图层框 top
+            baselineY = hasDescender ? (top + ink.bottom - descenderPx) : (top + ink.bottom);
+            baselineMethod = 'ink-detect';
+          }
+
+          // 水平锚点：左对齐=左边，居中=中心，右对齐=右边；有 ink 时按实际像素修正
+          const just = layer.textData.align || 'left';
+          let anchorX = left;
+          if (just === 'center') anchorX = Math.round((left + right) / 2);
+          else if (just === 'right') anchorX = right;
+          if (ink && shapeType === 'point') {
+            // 左对齐锚点在 ink left；居中锚点在 ink 中心；右对齐锚点在 ink right
+            if (just === 'left') anchorX = left + ink.left;
+            else if (just === 'right') anchorX = left + ink.right;
+            else anchorX = left + Math.round((ink.left + ink.right) / 2);
+          }
+
+          // 位置对比报告
+          positionReport.push({
+            name: layer.name,
+            text: (layer.textData.text || '').slice(0, 24),
+            figmaBox: { x: left, y: top, w: right - left, h: bottom - top },
+            ink: ink,
+            estimatedBaselineY: estimatedBaselineY,
+            usedBaselineY: baselineY,
+            baselineMethod: baselineMethod,
+            anchorX: anchorX
+          });
+
+          const textObj = {
+            text: layer.textData.text,
+            // box 文本：TySh 文本框边界 = boxBounds 绝对坐标（已在下方 boxBounds 设置），
+            // 这里 text.left/top/right/bottom 也填 box 边界（ag-psd 会写入 TySh）。
+            // 关键：box 文本 transform 必须用单位阵 [1,0,0,1,0,0]！
+            // 若 transform 平移量写 (left,top) 且 boxBounds 也写绝对坐标，Photoshop
+            // 会把两者叠加成 2 倍偏移（实测 box-B 渲染到 (144,1404) 而非 (72,702)）。
+            left: shapeType === 'box' ? left : 0,
+            top: shapeType === 'box' ? top : 0,
+            right: shapeType === 'box' ? right : 0,
+            bottom: shapeType === 'box' ? bottom : 0,
+            transform: shapeType === 'box'
+              ? [1, 0, 0, 1, 0, 0]
+              : [1, 0, 0, 1, anchorX, baselineY],
+            shapeType: shapeType,
+            antiAlias: 'sharp',
+            gridding: 'none',
+            orientation: 'horizontal',
+            index: 0,
+            style: {
+              font: {
+                name: layer.textData.fontName || 'ArialMT',
+                script: layer.textData.fontScript || 0,
+                type: layer.textData.fontType || 0,
+                synthetic: 0
+              },
+              fontSize: fontSizePt,
+              autoLeading: !layer.textData.lineHeight,
+              leading: layer.textData.lineHeight || 0,
+              tracking: layer.textData.letterSpacing || 0,
+              fauxBold: !!layer.textData.fauxBold,
+              fauxItalic: !!layer.textData.fauxItalic,
+              underline: !!layer.textData.underline,
+              strikethrough: !!layer.textData.strikethrough,
+              autoKerning: true,
+              kerning: 0,
+              baselineShift: 0,
+              fillColor: { r: rVal, g: gVal, b: bVal },
+              strokeColor: { r: rVal, g: gVal, b: bVal },
+              fillFlag: true,
+              strokeFlag: false,
+              fillFirst: true,
+              horizontalScale: 1,
+              verticalScale: 1,
+              ligatures: true,
+              baselineDirection: 2,
+              styleRunAlignment: 2,
+              language: 0,
+              noBreak: false,
+              yUnderline: 1,
+              outlineWidth: 1,
+              characterDirection: 0,
+              hindiNumbers: false,
+              kashida: 1,
+              diacriticPos: 2
+            },
+            paragraphStyle: {
+              justification: layer.textData.align || 'left',
+              firstLineIndent: 0,
+              startIndent: 0,
+              endIndent: 0,
+              spaceBefore: 0,
+              spaceAfter: 0,
+              autoHyphenate: true,
+              hyphenatedWordSize: 6,
+              preHyphen: 2,
+              postHyphen: 2,
+              consecutiveHyphens: 8,
+              zone: 36,
+              wordSpacing: [0.8, 1, 1.33],
+              letterSpacing: [0, 0, 0],
+              glyphSpacing: [1, 1, 1],
+              autoLeading: layer.textData.lineHeight ? 1 : 1.2,
+              leadingType: 0,
+              hanging: false,
+              burasagari: false,
+              kinsokuOrder: 0,
+              everyLineComposer: false
+            }
+          };
+
+          // box 文本：给出精确文本框边界（文档坐标），并设置垂直对齐
+          if (shapeType === 'box') {
+            textObj.boxBounds = [left, top, right, bottom];
+            textObj.pointBase = undefined;
+            if (layer.textData.textAlignVertical === 'center') {
+              // 垂直居中对齐：box 文本需要 leading 撑开
+              textObj.paragraphStyle.leadingType = 2;
+            }
+          } else {
+            textObj.pointBase = [0, 0];
+          }
+
+          // 字体回退 run：拉丁字体文本中的 ￥/中文/全角符号 使用 CJK 字体（避免空心方块）
+          if (layer.textData.styleRuns && layer.textData.styleRuns.length) {
+            textObj.styleRuns = layer.textData.styleRuns.map(run => ({
+              length: run.length,
+              style: {
+                font: {
+                  name: run.fontName || 'SimSun',
+                  script: run.fontScript || 3,
+                  type: run.fontType || 2,
+                  synthetic: 0
+                }
+              }
+            }));
+          }
+
+          const textLayerObj = {
+            name: layer.name,
+            hidden: layer.visible === false,
+            blendMode: sanitizeBlendMode(layer.blendMode, false),
+            left: left,
+            top: top,
+            right: right,
+            bottom: bottom,
+            text: textObj
+          };
+
+          if (typeof layer.opacity === 'number' && layer.opacity < 0.99) {
+            textLayerObj.opacity = layer.opacity;
+          }
+
+          // 文本图层同时附带栅格预览像素（Photoshop 文本图层本身既含像素也含 TySh）
+          if (textCanvas) {
+            textLayerObj.canvas = textCanvas;
+          } else {
+            // 文本像素缺失时仍提供正确尺寸的透明画布，保证图层记录边界有效
+            const emptyCanvas = document.createElement('canvas');
+            emptyCanvas.width = Math.max(1, right - left);
+            emptyCanvas.height = Math.max(1, bottom - top);
+            textLayerObj.canvas = emptyCanvas;
+          }
+
+          layerMap.set(layer.id, textLayerObj);
+        } else {
+          const { canvas } = await base64ToCanvasOnly(layer.pngBase64, layer.name);
+
+          const left = Math.round(layer.x);
+          const top = Math.round(layer.y);
+          const right = left + canvas.width;
+          const bottom = top + canvas.height;
+
+          const layerObj = {
+            name: layer.name,
+            hidden: layer.visible === false,
+            blendMode: sanitizeBlendMode(layer.blendMode, false),
+            left: left,
+            top: top,
+            right: right,
+            bottom: bottom,
+            canvas: canvas
+          };
+
+          if (typeof layer.opacity === 'number' && layer.opacity < 0.99) {
+            layerObj.opacity = layer.opacity;
+          }
+
+          layerMap.set(layer.id, layerObj);
+        }
+      }
+
+      for (const layer of layers) {
+        const currentObj = layerMap.get(layer.id);
+        if (!currentObj) continue;
+
+        if (layer.parentId && layerMap.has(layer.parentId)) {
+          const parentGroup = layerMap.get(layer.parentId);
+          if (parentGroup.children) {
+            parentGroup.children.push(currentObj);
+          }
+        } else {
+          rootChildren.push(currentObj);
+        }
+      }
+
+      const psdData = {
+        width: docWidth,
+        height: docHeight,
+        canvas: rootCanvas,
+        imageResources: {
+          resolutionInfo: {
+            horizontalResolution: 72 * exportScale,
+            horizontalResolutionUnit: 'PPI',
+            widthUnit: 'Inches',
+            verticalResolution: 72 * exportScale,
+            verticalResolutionUnit: 'PPI',
+            heightUnit: 'Inches'
+          }
+        },
+        children: rootChildren
+      };
+
+      // noBackground: 让最底层图层保持普通图层（不自动转换为锁定背景层）
+      const psdBuffer = agPsd.writePsd(psdData, { generateThumbnail: true, noBackground: true });
+
+      // ---- 文字位置对比报告（Figma 原始位置 vs 写入 PSD 的基线）----
+      if (positionReport.length > 0) {
+        console.log('========== 文字位置对比报告 ==========');
+        for (const r of positionReport) {
+          const inkStr = r.ink
+            ? `ink(t=${r.ink.top},b=${r.ink.bottom},l=${r.ink.left},r=${r.ink.right})`
+            : 'ink=无像素';
+          const delta = r.usedBaselineY - r.estimatedBaselineY;
+          console.log(
+            `[${r.name}] "${r.text}"\n` +
+            `  Figma框: (${r.figmaBox.x},${r.figmaBox.y}) ${r.figmaBox.w}x${r.figmaBox.h}\n` +
+            `  ${inkStr}\n` +
+            `  基线: 度量估算=${r.estimatedBaselineY} 实际使用=${r.usedBaselineY} (方法=${r.baselineMethod}, 差值=${delta >= 0 ? '+' : ''}${delta}px)\n` +
+            `  水平锚点X=${r.anchorX}`
+          );
+        }
+        console.log('======================================');
+      }
+
+      const blob = new Blob([psdBuffer], { type: 'application/x-photoshop' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${artboardName.replace(/[/\\?%*:|"<>]/g, '_')}.psd`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
