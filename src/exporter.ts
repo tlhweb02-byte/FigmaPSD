@@ -82,6 +82,62 @@ async function renderContainerBackground(
   }
 }
 
+/**
+ * 测量 Figma 文本的首行基线与实际行数（不修改原文档）。
+ *
+ * Figma API 没有直接提供基线。做法：克隆文本节点到当前页，
+ *   1. 改为自动高度，读出内容高度（用于垂直居中/底部对齐的偏移和行数）；
+ *   2. 把内容换成单个 "H"（沿用首字符样式），去掉装饰线/描边/阴影，
+ *      "H" 底部严格落在基线上，因此 渲染范围底部 - 文本框顶部 = 框顶到首行基线的距离。
+ * 克隆节点测量后立即删除。字体无法加载或节点有旋转时返回 null，由 UI 端退回像素检测。
+ */
+async function measureTextLayout(node: TextNode): Promise<{ baselineOffset: number; lines: number } | null> {
+  if ('rotation' in node && Math.abs(node.rotation) > 0.01) return null;
+  let clone: TextNode | null = null;
+  try {
+    const fonts = new Map<string, FontName>();
+    for (const seg of node.getStyledTextSegments(['fontName'])) {
+      fonts.set(seg.fontName.family + '\u0000' + seg.fontName.style, seg.fontName);
+    }
+    for (const f of fonts.values()) await figma.loadFontAsync(f);
+
+    clone = node.clone();
+    figma.currentPage.appendChild(clone);
+    clone.x = 0;
+    clone.y = 0;
+    clone.effects = [];
+    clone.strokes = [];
+    clone.textAlignVertical = 'TOP';
+    if ('textTruncation' in clone && clone.textTruncation !== 'DISABLED') clone.textTruncation = 'DISABLED';
+    if (clone.textAutoResize !== 'WIDTH_AND_HEIGHT') clone.textAutoResize = 'HEIGHT';
+    const contentHeight = clone.height;
+
+    clone.characters = 'H';
+    clone.textDecoration = 'NONE';
+    const lineHeight = clone.height;
+    const box = clone.absoluteBoundingBox;
+    const render = clone.absoluteRenderBounds;
+    if (!box || !render || lineHeight <= 0) return null;
+    const firstBaseline = render.y + render.height - box.y;
+
+    // 固定高度文本框的垂直对齐偏移
+    let vOffset = 0;
+    if (node.textAutoResize === 'NONE' || node.textAutoResize === 'TRUNCATE') {
+      if (node.textAlignVertical === 'CENTER') vOffset = (node.height - contentHeight) / 2;
+      else if (node.textAlignVertical === 'BOTTOM') vOffset = node.height - contentHeight;
+    }
+    return {
+      baselineOffset: vOffset + firstBaseline,
+      lines: Math.max(1, Math.round(contentHeight / lineHeight))
+    };
+  } catch (err) {
+    console.warn(`文本 ${node.name} 基线测量失败，改用像素检测:`, err);
+    return null;
+  } finally {
+    if (clone) clone.remove();
+  }
+}
+
 export async function handleExportPSD(nodeId: string, scale: number = 1, exportMode: string = 'hierarchical'): Promise<void> {
   // getNodeById 已废弃，且在 documentAccess: dynamic-page 下会直接抛异常
   const targetNode = (await figma.getNodeByIdAsync(nodeId)) as FrameNode | null;
@@ -251,22 +307,24 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
     } else if (item.kind === 'text') {
       // TEXT 节点：解析原生可编辑文本属性（TySh），同时导出 PNG 作为栅格预览
       //（Photoshop 文本图层本身就同时包含像素与 TySh 描述符，二者缺一不可）
+      const layout = await measureTextLayout(item.node as TextNode);
       let textData: NativePsdTextData | null = null;
       try {
-        textData = await parseTextNode(item.node as TextNode, scale, item.name);
+        textData = await parseTextNode(item.node as TextNode, scale, item.name, layout ? layout.lines : undefined);
+        if (textData && layout) {
+          textData.baselineY = Math.round((item.y + layout.baselineOffset) * scale * 100) / 100;
+        }
       } catch (fontErr) {
         console.warn(`文本属性解析异常:`, fontErr);
       }
 
       let textPngBase64: string | undefined = undefined;
       try {
-        // useAbsoluteBounds：PNG 与文本框（absoluteBoundingBox）完全对齐。
-        // 默认导出会裁切到字形实际像素，PNG 左上角不再是文本框左上角，
-        // 既会让预览像素错位，也会让 UI 端基于 PNG 的基线检测整体偏移。
+        // 按渲染范围导出（不用 useAbsoluteBounds）：行高小于字号时（中文设计稿很常见）
+        // 字形会超出文本框，按文本框导出会把字的顶部/底部裁掉。PNG 用 renderX/renderY 定位。
         const pngBytes = await item.node.exportAsync({
           format: 'PNG',
-          constraint: { type: 'SCALE', value: scale },
-          useAbsoluteBounds: true
+          constraint: { type: 'SCALE', value: scale }
         });
         textPngBase64 = uint8ToBase64(pngBytes);
       } catch (pngErr) {

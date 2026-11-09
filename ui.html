@@ -576,19 +576,23 @@
           }
           const ink = textCanvas ? detectTextInk(textCanvas) : null;
 
-          // PNG 坐标原点：正常情况下文本 PNG 按文本框导出（原点 = 框左上角）。
-          // 若 PNG 尺寸与文本框不符，说明它被裁到了字形范围（Figma 默认导出行为），
-          // 原点是字形渲染范围左上角。此时仍按框顶换算，大字号文本会整体上移
-          // "框顶到字形顶部"的距离（行高越大、字号越大偏得越多）。
-          const pngMatchesBox = !!textCanvas &&
-            Math.abs(textCanvas.width - (right - left)) <= 2 &&
-            Math.abs(textCanvas.height - (bottom - top)) <= 2;
-          const pngLeft = (!pngMatchesBox && textCanvas && typeof layer.renderX === 'number') ? layer.renderX : left;
-          const pngTop = (!pngMatchesBox && textCanvas && typeof layer.renderY === 'number') ? layer.renderY : top;
+          // PNG 坐标原点：主线程按渲染范围（字形实际范围）导出文本 PNG，原点是 renderX/renderY，
+          // 不是文本框左上角。若误按框顶换算，大字号文本会整体上移"框顶到字形顶部"的距离。
+          const useRenderOrigin = !!textCanvas &&
+            typeof layer.renderX === 'number' && typeof layer.renderY === 'number';
+          const pngLeft = useRenderOrigin ? layer.renderX : left;
+          const pngTop = useRenderOrigin ? layer.renderY : top;
 
           let baselineY = estimatedBaselineY;
           let baselineMethod = 'font-metrics';
-          if (ink && shapeType === 'point') {
+          // 实测基线应落在字形范围内（首行字形顶部之下、PNG 底部附近之上），否则视为测量异常
+          const measuredOk = typeof td.baselineY === 'number' && (!ink ||
+            (td.baselineY > pngTop + ink.top && td.baselineY < pngTop + ink.bottom + fontSizeScaled * 0.5));
+          if (measuredOk) {
+            // 最精确：主线程在 Figma 中实测的首行基线
+            baselineY = td.baselineY;
+            baselineMethod = 'figma-measure';
+          } else if (ink && shapeType === 'point') {
             if (td.multiLine) {
               // 多行文本：transform 基线是"首行"基线，ink.bottom 是末行底部，不能用；
               // 改为 首行视觉顶部(ink.top) + 视觉顶部到基线的距离
@@ -626,9 +630,16 @@
 
           // Figma 固定宽度 + 自动高度文本：框高恰好等于 Figma 排版高度，PS 行距算法略有差异时
           // 末行会被文本框截掉（不可见），因此 box 底部留出余量（顶部对齐，不影响位置）
-          const boxBottom = (shapeType === 'box' && td.autoHeight)
-            ? bottom + Math.max(2, Math.round(fontSizeScaled * 0.5))
-            : bottom;
+          // PS 段落文本的首行基线 = 文本框顶 + 字体 ascent；Figma 则是 框顶 + 半行距 + ascent。
+          // 有实测基线时由基线反推 PS 文本框顶部，使两边首行位置一致。
+          let boxTop = top;
+          if (shapeType === 'box' && measuredOk) {
+            const asc = (typeof td.fontAscentRatio === 'number' && td.fontAscentRatio > 0) ? td.fontAscentRatio : ascentRatio;
+            boxTop = Math.round((td.baselineY - fontSizeScaled * asc) * 100) / 100;
+          }
+          const boxBottom = boxTop + (bottom - top) + ((shapeType === 'box' && td.autoHeight)
+            ? Math.max(2, Math.round(fontSizeScaled * 0.5))
+            : 0);
 
           const defaultRun = {
             fontName: td.fontName,
@@ -650,7 +661,7 @@
             // 若 transform 平移量写 (left,top) 且 boxBounds 也写绝对坐标，Photoshop
             // 会把两者叠加成 2 倍偏移（实测 box-B 渲染到 (144,1404) 而非 (72,702)）。
             left: shapeType === 'box' ? left : 0,
-            top: shapeType === 'box' ? top : 0,
+            top: shapeType === 'box' ? boxTop : 0,
             right: shapeType === 'box' ? right : 0,
             bottom: shapeType === 'box' ? boxBottom : 0,
             transform: shapeType === 'box'
@@ -690,7 +701,7 @@
 
           // box 文本：给出精确文本框边界（文档坐标），并设置垂直对齐
           if (shapeType === 'box') {
-            textObj.boxBounds = [left, top, right, boxBottom];
+            textObj.boxBounds = [left, boxTop, right, boxBottom];
             if (td.textAlignVertical === 'center') {
               // 垂直居中对齐：box 文本需要 leading 撑开
               textObj.paragraphStyle.leadingType = 2;

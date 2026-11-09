@@ -13627,7 +13627,7 @@
   function sameRunStyle(a, b) {
     return a.fontName === b.fontName && a.fontSize === b.fontSize && a.tracking === b.tracking && a.leading === b.leading && a.underline === b.underline && a.strikethrough === b.strikethrough && a.fontCaps === b.fontCaps && a.color.r === b.color.r && a.color.g === b.color.g && a.color.b === b.color.b && a.color.a === b.color.a;
   }
-  async function parseTextNode(node, scale, fallbackName) {
+  async function parseTextNode(node, scale, fallbackName, lineCount) {
     const segments = getSegments(node);
     const fallbackFont = pickCjkFallbackFont();
     let text = "";
@@ -13698,7 +13698,9 @@
     else if (node.textAlignHorizontal === "RIGHT") align = "right";
     else if (node.textAlignHorizontal === "JUSTIFIED") align = "justify-all";
     const autoResize = node.textAutoResize;
-    const shapeType = autoResize === "WIDTH_AND_HEIGHT" ? "point" : "box";
+    const hasHardBreak = text.indexOf("\n") >= 0;
+    const fitsOneLine = lineCount !== void 0 && lineCount <= 1 && !hasHardBreak;
+    const shapeType = autoResize === "WIDTH_AND_HEIGHT" || fitsOneLine ? "point" : "box";
     const textAlignVertical = node.textAlignVertical === "CENTER" ? "center" : node.textAlignVertical === "BOTTOM" ? "bottom" : "top";
     return {
       text,
@@ -13711,7 +13713,8 @@
       descentRatio: getFontDescentRatio(baseFamily, baseStyle),
       shapeType,
       autoHeight: autoResize === "HEIGHT",
-      multiLine: text.indexOf("\n") >= 0,
+      multiLine: hasHardBreak,
+      fontAscentRatio: getFontAscentRatio(baseFamily, baseStyle),
       textAlignVertical,
       color: first.color,
       align,
@@ -13829,6 +13832,48 @@
       return null;
     } finally {
       if (rect) rect.remove();
+    }
+  }
+  async function measureTextLayout(node) {
+    if ("rotation" in node && Math.abs(node.rotation) > 0.01) return null;
+    let clone = null;
+    try {
+      const fonts = /* @__PURE__ */ new Map();
+      for (const seg of node.getStyledTextSegments(["fontName"])) {
+        fonts.set(seg.fontName.family + "\0" + seg.fontName.style, seg.fontName);
+      }
+      for (const f of fonts.values()) await figma.loadFontAsync(f);
+      clone = node.clone();
+      figma.currentPage.appendChild(clone);
+      clone.x = 0;
+      clone.y = 0;
+      clone.effects = [];
+      clone.strokes = [];
+      clone.textAlignVertical = "TOP";
+      if ("textTruncation" in clone && clone.textTruncation !== "DISABLED") clone.textTruncation = "DISABLED";
+      if (clone.textAutoResize !== "WIDTH_AND_HEIGHT") clone.textAutoResize = "HEIGHT";
+      const contentHeight = clone.height;
+      clone.characters = "H";
+      clone.textDecoration = "NONE";
+      const lineHeight = clone.height;
+      const box = clone.absoluteBoundingBox;
+      const render = clone.absoluteRenderBounds;
+      if (!box || !render || lineHeight <= 0) return null;
+      const firstBaseline = render.y + render.height - box.y;
+      let vOffset = 0;
+      if (node.textAutoResize === "NONE" || node.textAutoResize === "TRUNCATE") {
+        if (node.textAlignVertical === "CENTER") vOffset = (node.height - contentHeight) / 2;
+        else if (node.textAlignVertical === "BOTTOM") vOffset = node.height - contentHeight;
+      }
+      return {
+        baselineOffset: vOffset + firstBaseline,
+        lines: Math.max(1, Math.round(contentHeight / lineHeight))
+      };
+    } catch (err) {
+      console.warn(`\u6587\u672C ${node.name} \u57FA\u7EBF\u6D4B\u91CF\u5931\u8D25\uFF0C\u6539\u7528\u50CF\u7D20\u68C0\u6D4B:`, err);
+      return null;
+    } finally {
+      if (clone) clone.remove();
     }
   }
   async function handleExportPSD(nodeId, scale = 1, exportMode = "hierarchical") {
@@ -13966,9 +14011,13 @@
           });
         }
       } else if (item.kind === "text") {
+        const layout = await measureTextLayout(item.node);
         let textData = null;
         try {
-          textData = await parseTextNode(item.node, scale, item.name);
+          textData = await parseTextNode(item.node, scale, item.name, layout ? layout.lines : void 0);
+          if (textData && layout) {
+            textData.baselineY = Math.round((item.y + layout.baselineOffset) * scale * 100) / 100;
+          }
         } catch (fontErr) {
           console.warn(`\u6587\u672C\u5C5E\u6027\u89E3\u6790\u5F02\u5E38:`, fontErr);
         }
@@ -13976,8 +14025,7 @@
         try {
           const pngBytes = await item.node.exportAsync({
             format: "PNG",
-            constraint: { type: "SCALE", value: scale },
-            useAbsoluteBounds: true
+            constraint: { type: "SCALE", value: scale }
           });
           textPngBase64 = uint8ToBase64(pngBytes);
         } catch (pngErr) {

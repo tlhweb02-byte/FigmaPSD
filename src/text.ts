@@ -40,6 +40,12 @@ export interface NativePsdTextData {
   shapeType: 'point' | 'box'; // Figma 自动宽度文本 -> point，固定宽度（含自动高度）-> box
   autoHeight: boolean; // Figma 固定宽度 + 自动高度：PS 文本框底部需要留余量，避免末行被截掉
   multiLine: boolean; // 含换行（point 文本的基线只能按首行计算）
+  fontAscentRatio: number; // 首行字体 ascent / 字号（box 文本用于由基线反推 PS 文本框顶部）
+  /**
+   * Figma 实测的首行基线（文档像素，已乘倍率）。由主线程用临时克隆节点测量，
+   * 是最精确的定位依据；测量失败时为 undefined，UI 端退回像素检测。
+   */
+  baselineY?: number;
   textAlignVertical: 'top' | 'center' | 'bottom'; // box 文本垂直对齐
   color: { r: number; g: number; b: number; a: number }; // 0..1（写入时转 0..255）
   align: 'left' | 'center' | 'right' | 'justify-all'; // Photoshop justification
@@ -318,7 +324,17 @@ function sameRunStyle(a: PsdTextRun, b: PsdTextRun): boolean {
     a.color.b === b.color.b && a.color.a === b.color.a;
 }
 
-export async function parseTextNode(node: TextNode, scale: number, fallbackName: string): Promise<NativePsdTextData> {
+/**
+ * @param lineCount Figma 实际排版行数（主线程测量；未知时为 undefined）。
+ *   固定宽度文本若实际只有一行，导出为 point 文本：PS 原生稿中的单行标签都是 point 文本，
+ *   定位只取决于基线，最稳定；box 文本的首行位置由 PS 按自身算法决定，容易偏移。
+ */
+export async function parseTextNode(
+  node: TextNode,
+  scale: number,
+  fallbackName: string,
+  lineCount?: number
+): Promise<NativePsdTextData> {
   const segments = getSegments(node);
   const fallbackFont = pickCjkFallbackFont();
 
@@ -397,7 +413,9 @@ export async function parseTextNode(node: TextNode, scale: number, fallbackName:
   // 固定宽度（NONE）、固定宽度自动高度（HEIGHT，最常见的段落文本）、截断（TRUNCATE）
   // 都会在宽度处自动换行，必须是 box 文本，否则 PS 中会变成一整行不换行。
   const autoResize = node.textAutoResize;
-  const shapeType: 'point' | 'box' = autoResize === 'WIDTH_AND_HEIGHT' ? 'point' : 'box';
+  const hasHardBreak = text.indexOf('\n') >= 0;
+  const fitsOneLine = lineCount !== undefined && lineCount <= 1 && !hasHardBreak;
+  const shapeType: 'point' | 'box' = (autoResize === 'WIDTH_AND_HEIGHT' || fitsOneLine) ? 'point' : 'box';
 
   const textAlignVertical: 'top' | 'center' | 'bottom' =
     node.textAlignVertical === 'CENTER' ? 'center' :
@@ -414,7 +432,8 @@ export async function parseTextNode(node: TextNode, scale: number, fallbackName:
     descentRatio: getFontDescentRatio(baseFamily, baseStyle),
     shapeType: shapeType,
     autoHeight: autoResize === 'HEIGHT',
-    multiLine: text.indexOf('\n') >= 0,
+    multiLine: hasHardBreak,
+    fontAscentRatio: getFontAscentRatio(baseFamily, baseStyle),
     textAlignVertical: textAlignVertical,
     color: first.color,
     align: align,
