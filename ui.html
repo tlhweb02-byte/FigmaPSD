@@ -98,6 +98,51 @@
       cursor: not-allowed;
     }
 
+    .artboard-list {
+      max-height: 168px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 0;
+    }
+
+    .artboard-item, .check-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-weight: normal;
+      color: var(--text);
+      margin: 0;
+    }
+
+    .artboard-item:hover {
+      background: var(--secondary-bg);
+    }
+
+    .artboard-item span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .list-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .list-header label {
+      margin: 0;
+    }
+
+    .check-row {
+      padding: 0;
+      margin-bottom: 12px;
+    }
+
     .empty-state {
       padding: 20px;
       text-align: center;
@@ -155,8 +200,11 @@
     </div>
 
     <div class="form-group" id="artboard-select-group" style="display: none;">
-      <label for="artboard-select">目标导出画板：</label>
-      <select id="artboard-select"></select>
+      <div class="list-header">
+        <label>目标导出画板（可多选，每个画板导出一个 PSD）：</label>
+        <label class="check-row" style="margin:0"><input type="checkbox" id="select-all" checked> 全选</label>
+      </div>
+      <div class="artboard-list" id="artboard-list"></div>
     </div>
   </div>
 
@@ -178,6 +226,8 @@
     </div>
   </div>
 
+  <label class="check-row"><input type="checkbox" id="zip-check"> 打包成一个 ZIP 下载（浏览器拦截多个文件下载时勾选）</label>
+
   <button class="btn" id="export-btn" disabled>导出 PSD 文件</button>
 
   <div class="progress-container" id="progress-container">
@@ -194,7 +244,9 @@
   </div>
 
   <script>
-    const artboardSelect = document.getElementById('artboard-select');
+    const artboardList = document.getElementById('artboard-list');
+    const selectAll = document.getElementById('select-all');
+    const zipCheck = document.getElementById('zip-check');
     const artboardGroup = document.getElementById('artboard-select-group');
     const emptyState = document.getElementById('empty-state');
     const exportBtn = document.getElementById('export-btn');
@@ -206,6 +258,78 @@
 
     let currentArtboards = [];
 
+    // ---- 批量导出队列：一次只处理一个画板，生成并下载后再处理下一个（避免内存叠加）----
+    let batch = null; // { queue: [{id,name}], index, scale, mode, zip, files: [], failed: [], usedNames: Set }
+
+    function getCheckedIds() {
+      return Array.from(artboardList.querySelectorAll('input[type=checkbox]:checked')).map(el => el.value);
+    }
+
+    function refreshExportButton() {
+      const n = getCheckedIds().length;
+      exportBtn.disabled = !!batch || n === 0;
+      exportBtn.textContent = n > 1 ? `导出 ${n} 个 PSD 文件` : '导出 PSD 文件';
+      const boxes = artboardList.querySelectorAll('input[type=checkbox]');
+      selectAll.checked = boxes.length > 0 && n === boxes.length;
+      selectAll.indeterminate = n > 0 && n < boxes.length;
+    }
+
+    selectAll.addEventListener('change', () => {
+      artboardList.querySelectorAll('input[type=checkbox]').forEach(el => { el.checked = selectAll.checked; });
+      refreshExportButton();
+    });
+
+    function batchPrefix() {
+      if (!batch || batch.queue.length <= 1) return '';
+      const item = batch.queue[batch.index];
+      return `画板 ${batch.index + 1}/${batch.queue.length}「${item ? item.name : ''}」 `;
+    }
+
+    function uniqueFileName(name) {
+      const base = (name || 'export').replace(/[/\\?%*:|"<>]/g, '_');
+      let fileName = base + '.psd';
+      let n = 2;
+      while (batch.usedNames.has(fileName)) fileName = `${base} (${n++}).psd`;
+      batch.usedNames.add(fileName);
+      return fileName;
+    }
+
+    function startNextInBatch() {
+      if (!batch) return;
+      if (batch.index >= batch.queue.length) {
+        finishBatch();
+        return;
+      }
+      const item = batch.queue[batch.index];
+      progressFill.style.width = '0%';
+      statusText.textContent = batchPrefix() + '准备抓取图层信息...';
+      parent.postMessage({
+        pluginMessage: { type: 'export-psd', nodeId: item.id, scale: batch.scale, exportMode: batch.mode }
+      }, '*');
+    }
+
+    function advanceBatch() {
+      batch.index++;
+      // 连续下载之间稍作间隔，降低浏览器把多次下载合并/拦截的概率
+      setTimeout(startNextInBatch, batch.zip ? 0 : 400);
+    }
+
+    function finishBatch() {
+      const b = batch;
+      if (b.zip && b.files.length) {
+        const zipName = b.files.length === 1 ? null : `Figma2PSD-${b.files.length}个画板.zip`;
+        if (zipName) downloadBlob(buildZip(b.files), zipName);
+        else downloadBlob(new Blob([b.files[0].data], { type: 'application/x-photoshop' }), b.files[0].name);
+      }
+      const ok = b.queue.length - b.failed.length;
+      progressFill.style.width = '100%';
+      statusText.textContent = b.failed.length
+        ? `⚠️ 完成 ${ok}/${b.queue.length} 个，失败：${b.failed.join('；')}`
+        : (b.queue.length > 1 ? `✅ ${ok} 个 PSD 全部导出成功！` : '✅ PSD 导出成功！');
+      batch = null;
+      refreshExportButton();
+    }
+
     // 监听来自 Figma Plugin code.js 的消息
     window.onmessage = async (event) => {
       const msg = event.data.pluginMessage;
@@ -216,67 +340,171 @@
         if (msg.hasSelection && currentArtboards.length > 0) {
           emptyState.style.display = 'none';
           artboardGroup.style.display = 'block';
-          artboardSelect.innerHTML = '';
+          // 保留之前取消勾选的状态；新出现的画板默认勾选
+          const unchecked = new Set(Array.from(artboardList.querySelectorAll('input[type=checkbox]:not(:checked)')).map(el => el.value));
+          artboardList.innerHTML = '';
           currentArtboards.forEach((ab) => {
-            const opt = document.createElement('option');
-            opt.value = ab.id;
-            opt.textContent = `${ab.name} (${ab.width}x${ab.height})`;
-            artboardSelect.appendChild(opt);
+            const row = document.createElement('label');
+            row.className = 'artboard-item';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = ab.id;
+            cb.dataset.name = ab.name;
+            cb.checked = !unchecked.has(ab.id);
+            cb.addEventListener('change', refreshExportButton);
+            const text = document.createElement('span');
+            text.textContent = `${ab.name} (${ab.width}x${ab.height})`;
+            text.title = text.textContent;
+            row.appendChild(cb);
+            row.appendChild(text);
+            artboardList.appendChild(row);
           });
-          exportBtn.disabled = false;
+          refreshExportButton();
         } else {
           emptyState.style.display = 'block';
           artboardGroup.style.display = 'none';
-          exportBtn.disabled = true;
+          artboardList.innerHTML = '';
+          if (!batch) exportBtn.disabled = true;
         }
       } else if (msg.type === 'status') {
         progressContainer.style.display = 'block';
-        statusText.textContent = msg.status;
+        statusText.textContent = batchPrefix() + msg.status;
       } else if (msg.type === 'progress') {
         progressContainer.style.display = 'block';
         const percent = Math.round((msg.current / msg.total) * 100);
         progressFill.style.width = `${percent}%`;
-        statusText.textContent = `[${msg.current}/${msg.total}] 正在导出: ${msg.layerName}`;
+        statusText.textContent = batchPrefix() + `[${msg.current}/${msg.total}] 正在导出: ${msg.layerName}`;
       } else if (msg.type === 'export-data') {
-        statusText.textContent = '正在打包合成 PSD 文件...';
+        if (!batch) {
+          // 非按钮触发（如测试脚本直接发送数据）：按单个文件处理
+          batch = { queue: [{ id: 'single', name: msg.artboardName }], index: 0, zip: false, files: [], failed: [], usedNames: new Set() };
+        }
+        statusText.textContent = batchPrefix() + '正在打包合成 PSD 文件...';
         progressFill.style.width = '95%';
         try {
-          await generatePsdFile(msg);
-          progressFill.style.width = '100%';
-          statusText.textContent = '✅ PSD 导出成功！';
-          exportBtn.disabled = false;
+          const result = await generatePsdFile(msg);
+          const fileName = uniqueFileName(result.name);
+          if (batch.zip) batch.files.push({ name: fileName, data: result.data });
+          else downloadBlob(new Blob([result.data], { type: 'application/x-photoshop' }), fileName);
         } catch (err) {
           console.error('合成 PSD 失败详情:', err);
-          alert('合成 PSD 失败: ' + (err.message || err));
-          statusText.textContent = '❌ 导出失败';
-          exportBtn.disabled = false;
+          batch.failed.push(`${batch.queue[batch.index].name}（${err.message || err}）`);
         }
+        advanceBatch();
       } else if (msg.type === 'error') {
-        alert(msg.message);
-        progressContainer.style.display = 'none';
-        exportBtn.disabled = false;
+        if (batch) {
+          // 单个画板失败不中断整批，记录后继续下一个
+          batch.failed.push(`${batch.queue[batch.index].name}（${msg.message}）`);
+          advanceBatch();
+        } else {
+          alert(msg.message);
+          progressContainer.style.display = 'none';
+          refreshExportButton();
+        }
       }
     };
 
     // 触发导出按钮
     exportBtn.addEventListener('click', () => {
-      const selectedId = artboardSelect.value;
-      if (!selectedId) return;
+      const ids = getCheckedIds();
+      if (!ids.length || batch) return;
 
+      const nameById = new Map(currentArtboards.map(ab => [ab.id, ab.name]));
+      batch = {
+        queue: ids.map(id => ({ id, name: nameById.get(id) || id })),
+        index: 0,
+        scale: parseFloat(scaleSelect.value),
+        mode: modeSelect.value,
+        zip: zipCheck.checked,
+        files: [],
+        failed: [],
+        usedNames: new Set()
+      };
       exportBtn.disabled = true;
       progressContainer.style.display = 'block';
-      progressFill.style.width = '0%';
-      statusText.textContent = '准备抓取图层信息...';
-
-      parent.postMessage({
-        pluginMessage: {
-          type: 'export-psd',
-          nodeId: selectedId,
-          scale: parseFloat(scaleSelect.value),
-          exportMode: modeSelect.value
-        }
-      }, '*');
+      startNextInBatch();
     });
+
+    function downloadBlob(blob, fileName) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      // 延迟释放：立即 revoke 时，连续下载中后面的文件可能拿不到数据
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+
+    // ---- 最小 ZIP 打包（仅存储，不压缩；PSD 已是压缩数据，无需再压缩）----
+    const CRC_TABLE = (() => {
+      const t = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        t[n] = c >>> 0;
+      }
+      return t;
+    })();
+
+    function crc32(bytes) {
+      let c = 0xFFFFFFFF;
+      for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+      return (c ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function buildZip(files) {
+      const enc = new TextEncoder();
+      const parts = [];
+      const central = [];
+      let offset = 0;
+      const now = new Date();
+      const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+      const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+      for (const f of files) {
+        const data = f.data instanceof Uint8Array ? f.data : new Uint8Array(f.data);
+        const name = enc.encode(f.name);
+        const crc = crc32(data);
+        const local = new DataView(new ArrayBuffer(30));
+        local.setUint32(0, 0x04034b50, true);
+        local.setUint16(4, 20, true);
+        local.setUint16(6, 0x0800, true); // 文件名为 UTF-8（中文文件名）
+        local.setUint16(8, 0, true);      // 存储，不压缩
+        local.setUint16(10, dosTime, true);
+        local.setUint16(12, dosDate, true);
+        local.setUint32(14, crc, true);
+        local.setUint32(18, data.length, true);
+        local.setUint32(22, data.length, true);
+        local.setUint16(26, name.length, true);
+        local.setUint16(28, 0, true);
+        parts.push(local.buffer, name, data);
+
+        const cen = new DataView(new ArrayBuffer(46));
+        cen.setUint32(0, 0x02014b50, true);
+        cen.setUint16(4, 20, true);
+        cen.setUint16(6, 20, true);
+        cen.setUint16(8, 0x0800, true);
+        cen.setUint16(10, 0, true);
+        cen.setUint16(12, dosTime, true);
+        cen.setUint16(14, dosDate, true);
+        cen.setUint32(16, crc, true);
+        cen.setUint32(20, data.length, true);
+        cen.setUint32(24, data.length, true);
+        cen.setUint16(28, name.length, true);
+        cen.setUint32(42, offset, true);
+        central.push(cen.buffer, name);
+        offset += 30 + name.length + data.length;
+      }
+      const centralSize = central.reduce((n, b) => n + (b.byteLength !== undefined ? b.byteLength : b.length), 0);
+      const end = new DataView(new ArrayBuffer(22));
+      end.setUint32(0, 0x06054b50, true);
+      end.setUint16(8, files.length, true);
+      end.setUint16(10, files.length, true);
+      end.setUint32(12, centralSize, true);
+      end.setUint32(16, offset, true);
+      return new Blob([...parts, ...central, end.buffer], { type: 'application/zip' });
+    }
 
     const ALLOWED_AG_PSD_MODES = new Set([
       'normal', 'pass through', 'darken', 'multiply', 'color burn', 'linear burn',
@@ -872,15 +1100,7 @@
         console.log('======================================');
       }
 
-      const blob = new Blob([psdBuffer], { type: 'application/x-photoshop' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${artboardName.replace(/[/\\?%*:|"<>]/g, '_')}.psd`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      return { name: artboardName, data: new Uint8Array(psdBuffer) };
     }
   </script>
 </body>

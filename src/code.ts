@@ -4,7 +4,7 @@
 
 import { handleExportPSD } from './exporter';
 
-figma.showUI(__html__, { width: 420, height: 560, themeColors: true });
+figma.showUI(__html__, { width: 420, height: 640, themeColors: true });
 
 function updateSelection(): void {
   const selection = figma.currentPage.selection;

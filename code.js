@@ -14087,7 +14087,7 @@
   }
 
   // src/code.ts
-  figma.showUI(__html__, { width: 420, height: 560, themeColors: true });
+  figma.showUI(__html__, { width: 420, height: 640, themeColors: true });
   function updateSelection() {
     const selection = figma.currentPage.selection;
     const artboards = [];
