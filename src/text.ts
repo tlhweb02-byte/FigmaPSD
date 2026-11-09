@@ -12,16 +12,34 @@
 
 import { FONT_PS_NAME_MAP, FONT_METRICS_MAP } from './font-map';
 
+
+/** 单个样式 run（对应 PS EngineData 的一个 StyleRun） */
+export interface PsdTextRun {
+  length: number; // UTF-16 码元数（与 PS / ag-psd 的文本长度计数一致）
+  fontName: string; // PostScript 字体名
+  fontScript: number; // 0=拉丁, 3=CJK
+  fontType: number; // 0=unknown, 1=OpenType, 2=TrueType
+  fontSize: number; // Point，与 Figma px 数值一致（不乘 scale）
+  color: { r: number; g: number; b: number; a: number }; // 0..1
+  tracking: number; // 1/1000 em
+  leading?: number; // Point；undefined 表示自动行距
+  underline: boolean;
+  strikethrough: boolean;
+  fontCaps: number; // 0=正常, 1=小型大写, 2=全部大写
+}
+
 export interface NativePsdTextData {
   text: string;
   fontName: string; // PostScript 字体名（Photoshop 可识别的 name）
   fontScript: number; // 0=拉丁, 3=CJK（与真实 PSD EngineData 对齐）
   fontType: number; // 0=unknown, 1=OpenType, 2=TrueType
   fontSize: number; // Point，与 Figma px 数值一致（如 Figma 24px -> 24pt），不乘 scale
-  fontSizeScaled: number; // = fontSize × scale，渲染像素字号（用于 TySh transform 基线定位）
-  ascentRatio: number; // 基线到框顶距离 / 字号（用于 TySh transform 基线定位）
+  fontSizeScaled: number; // 首行最大字号 × scale，渲染像素字号（用于 TySh transform 基线定位）
+  ascentRatio: number; // 首行"视觉顶部到基线"距离 / 字号（用于 TySh transform 基线定位）
   descentRatio: number; // 基线到 descender 底部距离 / 字号（含 descender 字符时用于修正基线）
-  shapeType: 'point' | 'box'; // Figma 自动宽度文本 -> point，固定宽度 -> box
+  shapeType: 'point' | 'box'; // Figma 自动宽度文本 -> point，固定宽度（含自动高度）-> box
+  autoHeight: boolean; // Figma 固定宽度 + 自动高度：PS 文本框底部需要留余量，避免末行被截掉
+  multiLine: boolean; // 含换行（point 文本的基线只能按首行计算）
   textAlignVertical: 'top' | 'center' | 'bottom'; // box 文本垂直对齐
   color: { r: number; g: number; b: number; a: number }; // 0..1（写入时转 0..255）
   align: 'left' | 'center' | 'right' | 'justify-all'; // Photoshop justification
@@ -31,12 +49,9 @@ export interface NativePsdTextData {
   fauxItalic: boolean;
   underline: boolean;
   strikethrough: boolean;
-  styleRuns?: Array<{
-    length: number;
-    fontName: string;
-    fontScript: number;
-    fontType: number;
-  }>; // 字体回退 run（如拉丁字体文本中的 ￥/中文 拆到 CJK 字体）
+  fontCaps: number;
+  /** 多样式文本 / 字体回退时的完整样式 run；单一样式时为 undefined */
+  styleRuns?: PsdTextRun[];
 }
 
 /** 判断字体是否为中文字体（影响 EngineData 的 script/type 字段） */
@@ -186,73 +201,191 @@ function pickCjkFallbackFont(): { name: string; script: number; type: number } {
   return { name: 'SimSun', script: 3, type: 2 };
 }
 
+
+type PsFont = { name: string; script: number; type: number };
+
 /**
- * 将文本拆成字体 run：拉丁/数字用主字体，￥/中文等用 CJK 回退字体。
- * 仅当文本同时包含两类字符且主字体不是 CJK 字体时才拆分。
- * 返回 run 长度数组（与 PS EngineData styleRuns 对齐：length 为字符数）。
+ * 将一段文本按字体回退拆分：拉丁/数字用主字体，￥/中文等用 CJK 回退字体。
+ * 长度按 UTF-16 码元计数（emoji 等代理对占 2），与 PS EngineData / ag-psd 一致。
  */
-export function buildFontRuns(
+export function splitByFontFallback(
   text: string,
   primaryIsCjk: boolean,
-  primaryFont: { name: string; script: number; type: number },
-  fallbackFont: { name: string; script: number; type: number }
-): Array<{ length: number; fontName: string; fontScript: number; fontType: number }> | undefined {
-  if (!text || primaryIsCjk) return undefined;
+  primaryFont: PsFont,
+  fallbackFont: PsFont
+): Array<{ length: number; font: PsFont }> {
+  if (!text) return [];
+  if (primaryIsCjk) return [{ length: text.length, font: primaryFont }];
 
-  // 扫描字符归属
-  const runs: Array<{ length: number; font: { name: string; script: number; type: number } }> = [];
-  let currentFont: { name: string; script: number; type: number } | null = null;
-  let currentLen = 0;
-
-  for (const ch of text) {
-    const needsFallback = isCjkFallbackChar(ch.charCodeAt(0));
-    const font = needsFallback ? fallbackFont : primaryFont;
-    if (currentFont && currentFont.name === font.name) {
-      currentLen++;
-    } else {
-      if (currentFont) runs.push({ length: currentLen, font: currentFont });
-      currentFont = font;
-      currentLen = 1;
-    }
+  const runs: Array<{ length: number; font: PsFont }> = [];
+  let i = 0;
+  while (i < text.length) {
+    const code = text.codePointAt(i) || 0;
+    const unitLen = code > 0xffff ? 2 : 1;
+    const font = isCjkFallbackChar(code) ? fallbackFont : primaryFont;
+    const last = runs[runs.length - 1];
+    if (last && last.font.name === font.name) last.length += unitLen;
+    else runs.push({ length: unitLen, font });
+    i += unitLen;
   }
-  if (currentFont) runs.push({ length: currentLen, font: currentFont });
+  return runs;
+}
 
-  // 若只有一种字体（全拉丁或全中文），无需拆 run
-  const distinct = new Set(runs.map(r => r.font.name));
-  if (distinct.size <= 1) return undefined;
+type TextSegment = {
+  characters: string;
+  start: number;
+  end: number;
+  fontName: FontName;
+  fontSize: number;
+  fills: readonly Paint[];
+  letterSpacing: LetterSpacing;
+  lineHeight: LineHeight;
+  textDecoration: TextDecoration;
+  textCase: TextCase;
+};
 
-  return runs.map(r => ({
-    length: r.length,
-    fontName: r.font.name,
-    fontScript: r.font.script,
-    fontType: r.font.type
-  }));
+/** 读取 Figma 文本的样式分段；接口不可用时退回节点级属性 */
+function getSegments(node: TextNode): TextSegment[] {
+  try {
+    const segs = node.getStyledTextSegments([
+      'fontName', 'fontSize', 'fills', 'letterSpacing', 'lineHeight', 'textDecoration', 'textCase'
+    ]);
+    if (segs && segs.length) return segs as unknown as TextSegment[];
+  } catch (err) {
+    console.warn('读取文本样式分段失败，使用节点级样式:', err);
+  }
+  const pick = <T>(v: T | PluginAPI['mixed'], d: T): T => (v === figma.mixed ? d : v as T);
+  return [{
+    characters: node.characters,
+    start: 0,
+    end: node.characters.length,
+    fontName: pick(node.fontName, { family: 'Arial', style: 'Regular' }),
+    fontSize: pick(node.fontSize, 16),
+    fills: pick(node.fills as readonly Paint[] | PluginAPI['mixed'], [] as readonly Paint[]),
+    letterSpacing: pick(node.letterSpacing, { unit: 'PIXELS', value: 0 } as LetterSpacing),
+    lineHeight: pick(node.lineHeight, { unit: 'AUTO' } as LineHeight),
+    textDecoration: pick(node.textDecoration, 'NONE' as TextDecoration),
+    textCase: pick(node.textCase, 'ORIGINAL' as TextCase)
+  }];
+}
+
+function round1(v: number): number {
+  return Math.round(v * 10) / 10;
+}
+
+function solidColor(fills: readonly Paint[]): { r: number; g: number; b: number; a: number } {
+  const solid = Array.isArray(fills)
+    ? fills.find(f => f.visible !== false && f.type === 'SOLID') as SolidPaint | undefined
+    : undefined;
+  if (!solid) return { r: 0, g: 0, b: 0, a: 1 };
+  return {
+    r: solid.color.r,
+    g: solid.color.g,
+    b: solid.color.b,
+    a: solid.opacity !== undefined ? solid.opacity : 1
+  };
+}
+
+/** Figma letterSpacing -> Photoshop tracking（1/1000 em） */
+function toTracking(ls: LetterSpacing, fontSize: number): number {
+  if (!ls || !ls.value) return 0;
+  if (ls.unit === 'PERCENT') return Math.round(ls.value * 10); // 1% em = 10/1000 em
+  return fontSize > 0 ? Math.round((ls.value / fontSize) * 1000) : 0;
+}
+
+/** Figma lineHeight -> Photoshop leading（pt，数值与 Figma px 一致）；AUTO 返回 undefined */
+function toLeading(lh: LineHeight, fontSize: number): number | undefined {
+  if (!lh || lh.unit === 'AUTO') return undefined;
+  if (lh.unit === 'PERCENT') return round1((lh.value / 100) * fontSize);
+  return round1(lh.value);
+}
+
+/** Figma textCase：UPPER/SMALL_CAPS 用 PS fontCaps（保持可编辑），LOWER/TITLE 直接转换字符 */
+function applyTextCase(chars: string, textCase: TextCase): { text: string; fontCaps: number } {
+  if (textCase === 'UPPER') return { text: chars, fontCaps: 2 };
+  if (textCase === 'SMALL_CAPS' || textCase === 'SMALL_CAPS_FORCED') return { text: chars, fontCaps: 1 };
+  let out = chars;
+  if (textCase === 'LOWER') out = chars.toLowerCase();
+  else if (textCase === 'TITLE') out = chars.replace(/(^|[\s\-])(\S)/g, (_m, sep, c) => sep + c.toUpperCase());
+  // 大小写转换在个别语言下会改变字符串长度，此时保留原文以免 run 长度错位
+  return { text: out.length === chars.length ? out : chars, fontCaps: 0 };
+}
+
+function sameRunStyle(a: PsdTextRun, b: PsdTextRun): boolean {
+  return a.fontName === b.fontName && a.fontSize === b.fontSize && a.tracking === b.tracking &&
+    a.leading === b.leading && a.underline === b.underline && a.strikethrough === b.strikethrough &&
+    a.fontCaps === b.fontCaps && a.color.r === b.color.r && a.color.g === b.color.g &&
+    a.color.b === b.color.b && a.color.a === b.color.a;
 }
 
 export async function parseTextNode(node: TextNode, scale: number, fallbackName: string): Promise<NativePsdTextData> {
-  if (node.fontName !== figma.mixed) {
-    try {
-      await figma.loadFontAsync(node.fontName);
-    } catch (err) {
-      console.warn('字体预加载跳过:', err);
-    }
-  }
+  const segments = getSegments(node);
+  const fallbackFont = pickCjkFallbackFont();
 
-  let color = { r: 0, g: 0, b: 0, a: 1 };
-  if (Array.isArray(node.fills) && node.fills.length > 0) {
-    const solidFill = node.fills.find(f => f.visible !== false && f.type === 'SOLID') as SolidPaint | undefined;
-    if (solidFill) {
-      color = {
-        r: solidFill.color.r,
-        g: solidFill.color.g,
-        b: solidFill.color.b,
-        a: solidFill.opacity !== undefined ? solidFill.opacity : 1
+  let text = '';
+  const runs: PsdTextRun[] = [];
+  // 首行（第一个换行之前）中字号最大的样式，决定首行基线位置
+  let firstLineMax: { size: number; family: string; style: string; text: string } | null = null;
+  let inFirstLine = true;
+
+  for (const seg of segments) {
+    const family = seg.fontName.family || 'Arial';
+    const style = seg.fontName.style || 'Regular';
+    const fontSize = typeof seg.fontSize === 'number' ? seg.fontSize : 16;
+    const isCjk = isCjkFont(family);
+    const primaryFont: PsFont = { name: toPsdFontName(family, style), script: isCjk ? 3 : 0, type: isCjk ? 2 : 0 };
+
+    // Figma 软换行 U+2028（Shift+Enter）在 PS 中没有对应字符，统一转为换行（长度不变）
+    const cased = applyTextCase(seg.characters.replace(/\u2028/g, '\n'), seg.textCase);
+    text += cased.text;
+
+    if (inFirstLine) {
+      const nl = cased.text.indexOf('\n');
+      const lineText = nl >= 0 ? cased.text.slice(0, nl) : cased.text;
+      if (lineText.length && (!firstLineMax || fontSize > firstLineMax.size)) {
+        firstLineMax = { size: fontSize, family, style, text: lineText };
+      } else if (firstLineMax && fontSize === firstLineMax.size) {
+        firstLineMax.text += lineText;
+      }
+      if (nl >= 0) inFirstLine = false;
+    }
+
+    const decoration = seg.textDecoration;
+    const common = {
+      fontSize: round1(fontSize),
+      color: solidColor(seg.fills),
+      tracking: toTracking(seg.letterSpacing, fontSize),
+      leading: toLeading(seg.lineHeight, fontSize),
+      underline: decoration === 'UNDERLINE',
+      strikethrough: decoration === 'STRIKETHROUGH',
+      fontCaps: cased.fontCaps
+    };
+
+    // 字体回退 run：拉丁字体中的 ￥/中文/全角符号 -> CJK 字体（避免 PS 空心方块）
+    for (const part of splitByFontFallback(cased.text, isCjk, primaryFont, fallbackFont)) {
+      const run: PsdTextRun = {
+        length: part.length,
+        fontName: part.font.name,
+        fontScript: part.font.script,
+        fontType: part.font.type,
+        ...common
       };
+      const last = runs[runs.length - 1];
+      if (last && sameRunStyle(last, run)) last.length += run.length;
+      else runs.push(run);
     }
   }
 
-  const fontObj = node.fontName !== figma.mixed ? node.fontName : { family: 'Arial', style: 'Regular' };
-  const fontSizeVal = typeof node.fontSize === 'number' ? node.fontSize : 16;
+  if (!text) text = fallbackName;
+  const first: PsdTextRun = runs[0] || {
+    length: text.length, fontName: 'ArialMT', fontScript: 0, fontType: 0, fontSize: 16,
+    color: { r: 0, g: 0, b: 0, a: 1 }, tracking: 0, leading: undefined,
+    underline: false, strikethrough: false, fontCaps: 0
+  };
+  const firstSeg = segments[0];
+  const baseFamily = firstLineMax ? firstLineMax.family : (firstSeg ? firstSeg.fontName.family : 'Arial');
+  const baseStyle = firstLineMax ? firstLineMax.style : (firstSeg ? firstSeg.fontName.style : 'Regular');
+  const baseSize = firstLineMax ? firstLineMax.size : first.fontSize;
 
   // Photoshop justification：JUSTIFIED -> justify-all
   let align: 'left' | 'center' | 'right' | 'justify-all' = 'left';
@@ -260,72 +393,40 @@ export async function parseTextNode(node: TextNode, scale: number, fallbackName:
   else if (node.textAlignHorizontal === 'RIGHT') align = 'right';
   else if (node.textAlignHorizontal === 'JUSTIFIED') align = 'justify-all';
 
-  // tracking：Figma letterSpacing(px) -> Photoshop 1/1000 em
-  let letterSpacingEm: number | undefined = undefined;
-  if (node.letterSpacing !== figma.mixed && node.letterSpacing && fontSizeVal > 0) {
-    if (node.letterSpacing.unit === 'PIXELS') {
-      letterSpacingEm = Math.round((node.letterSpacing.value / fontSizeVal) * 1000);
-    }
-  }
+  // 文本排版模式：只有"自动宽度"(WIDTH_AND_HEIGHT) 是 point 文本；
+  // 固定宽度（NONE）、固定宽度自动高度（HEIGHT，最常见的段落文本）、截断（TRUNCATE）
+  // 都会在宽度处自动换行，必须是 box 文本，否则 PS 中会变成一整行不换行。
+  const autoResize = node.textAutoResize;
+  const shapeType: 'point' | 'box' = autoResize === 'WIDTH_AND_HEIGHT' ? 'point' : 'box';
 
-  // leading：Figma lineHeight(px) -> Point（数值与 Figma 一致，不乘 scale）；
-  // AUTO/PERCENT 时留空让 PS 自动
-  let lineHeightPt: number | undefined = undefined;
-  if (node.lineHeight !== figma.mixed && node.lineHeight) {
-    if (node.lineHeight.unit === 'PIXELS') {
-      lineHeightPt = Math.round(node.lineHeight.value * 10) / 10;
-    }
-  }
-
-  // 字体风格 -> fauxBold / fauxItalic
-  const styleLower = fontObj.style.toLowerCase();
-  const fauxBold = /bold|700|800|900/.test(styleLower) && !/light|thin/.test(styleLower);
-  const fauxItalic = /italic|oblique/.test(styleLower);
-
-  // 文本排版模式：Figma 自动宽度/自动高度文本 -> point；固定宽度 -> box
-  const autoResize = 'textAutoResize' in node ? node.textAutoResize : 'HEIGHT';
-  const shapeType: 'point' | 'box' = (autoResize === 'NONE') ? 'box' : 'point';
-
-  // 垂直对齐（box 文本用）
   const textAlignVertical: 'top' | 'center' | 'bottom' =
     node.textAlignVertical === 'CENTER' ? 'center' :
     node.textAlignVertical === 'BOTTOM' ? 'bottom' : 'top';
 
-  // 装饰：UNDERLINE -> underline，STRIKETHROUGH -> strikethrough（互斥，勿同时设置）
-  const decoration = node.textDecoration !== figma.mixed ? node.textDecoration : 'NONE';
-  const underline = decoration === 'UNDERLINE';
-  const strikethrough = decoration === 'STRIKETHROUGH';
-
-  // 字体回退 run：拉丁字体中的 ￥/中文/全角符号 -> CJK 字体（避免 PS 空心方块）
-  const primaryIsCjk = isCjkFont(fontObj.family || '');
-  const primaryFont = {
-    name: toPsdFontName(fontObj.family || 'Arial', fontObj.style || 'Regular'),
-    script: primaryIsCjk ? 3 : 0,
-    type: primaryIsCjk ? 2 : 0
-  };
-  const styleRuns = buildFontRuns(node.characters || '', primaryIsCjk, primaryFont, pickCjkFallbackFont());
-
   return {
-    text: node.characters || fallbackName,
-    fontName: primaryFont.name,
-    fontScript: primaryFont.script,
-    fontType: primaryFont.type,
-    // 字号（pt）与 Figma px 数值一致（如 Figma 24px -> 24pt），不乘 scale；
-    // 渲染像素由文档 PPI（=72×scale）控制，保证视觉比例正确。
-    fontSize: Math.round(fontSizeVal * 10) / 10,
-    fontSizeScaled: Math.round(fontSizeVal * scale * 10) / 10,
-    ascentRatio: getTopToBaselineRatio(fontObj.family || 'Arial', fontObj.style || 'Regular', node.characters || ''),
-    descentRatio: getFontDescentRatio(fontObj.family || 'Arial', fontObj.style || 'Regular'),
+    text: text,
+    fontName: first.fontName,
+    fontScript: first.fontScript,
+    fontType: first.fontType,
+    fontSize: first.fontSize,
+    fontSizeScaled: round1(baseSize * scale),
+    ascentRatio: getTopToBaselineRatio(baseFamily, baseStyle, firstLineMax ? firstLineMax.text : text),
+    descentRatio: getFontDescentRatio(baseFamily, baseStyle),
     shapeType: shapeType,
+    autoHeight: autoResize === 'HEIGHT',
+    multiLine: text.indexOf('\n') >= 0,
     textAlignVertical: textAlignVertical,
-    color: color,
+    color: first.color,
     align: align,
-    letterSpacing: letterSpacingEm,
-    lineHeight: lineHeightPt,
-    fauxBold: fauxBold,
-    fauxItalic: fauxItalic,
-    underline: underline,
-    strikethrough: strikethrough,
-    styleRuns: styleRuns
+    letterSpacing: first.tracking || undefined,
+    lineHeight: first.leading,
+    // 字体名已解析为真实字重/斜体的 PostScript 名（如 Arial-BoldMT），
+    // 再开仿粗体/仿斜体会在 PS 中二次加粗/倾斜，因此始终关闭
+    fauxBold: false,
+    fauxItalic: false,
+    underline: first.underline,
+    strikethrough: first.strikethrough,
+    fontCaps: first.fontCaps,
+    styleRuns: runs.length > 1 ? runs : undefined
   };
 }

@@ -1,60 +1,90 @@
 /**
  * Exporter 模块 (src/exporter.ts)
- * 特别说明：对于 TEXT 节点绝对不调用 exportAsync PNG，直接读取文本属性传输；其它图层保持 Canvas PNG 机制
+ * 导出主流程：根画板合成图、容器背景离屏渲染、逐图层 PNG 导出、文本属性解析，最后发送给 UI 线程合成 PSD。
  */
 
-import { collectNodes, ParsedNodeItem } from './layers';
+import { collectNodes, hasOwnPaint, ParsedNodeItem, RelRect } from './layers';
 import { uint8ToBase64 } from './image';
 import { parseTextNode, NativePsdTextData } from './text';
-import { ExportLayerPayload, ExportDataPayload } from './psd-builder';
-
-const VALID_PSD_BLEND_MODES: Record<string, string> = {
-  'PASS_THROUGH': 'pass through',
-  'NORMAL': 'normal',
-  'DARKEN': 'darken',
-  'MULTIPLY': 'multiply',
-  'COLOR_BURN': 'color burn',
-  'LINEAR_BURN': 'linear burn',
-  'DARKER_COLOR': 'darker color',
-  'LIGHTEN': 'lighten',
-  'SCREEN': 'screen',
-  'COLOR_DODGE': 'color dodge',
-  'LINEAR_DODGE': 'linear dodge',
-  'LIGHTER_COLOR': 'lighter color',
-  'OVERLAY': 'overlay',
-  'SOFT_LIGHT': 'soft light',
-  'HARD_LIGHT': 'hard light',
-  'VIVID_LIGHT': 'vivid light',
-  'LINEAR_LIGHT': 'linear light',
-  'PIN_LIGHT': 'pin light',
-  'HARD_MIX': 'hard mix',
-  'DIFFERENCE': 'difference',
-  'EXCLUSION': 'exclusion',
-  'SUBTRACT': 'subtract',
-  'DIVIDE': 'divide',
-  'HUE': 'hue',
-  'SATURATION': 'saturation',
-  'COLOR': 'color',
-  'LUMINOSITY': 'luminosity'
-};
-
-function convertBlendMode(mode?: string, isGroup: boolean = false): string {
-  if (!mode || mode === 'PASS_THROUGH') {
-    return isGroup ? 'pass through' : 'normal';
-  }
-  const cleanMode = String(mode).toUpperCase().replace(/-/g, '_').replace(/ /g, '_');
-  const mapped = VALID_PSD_BLEND_MODES[cleanMode];
-  if (!mapped) return 'normal';
-  if (!isGroup && mapped === 'pass through') return 'normal';
-  return mapped;
-}
+import { ExportLayerPayload, ExportDataPayload, PixelRect } from './psd-builder';
+import { convertBlendMode } from './vector';
 
 function getNodeBlendMode(node: SceneNode): string {
   return 'blendMode' in node ? (node as BlendMixin).blendMode : 'NORMAL';
 }
 
+function scaleRect(r: RelRect | null | undefined, scale: number): PixelRect | null {
+  if (!r) return null;
+  const x = Math.round(r.x * scale);
+  const y = Math.round(r.y * scale);
+  return {
+    x,
+    y,
+    width: Math.round((r.x + r.width) * scale) - x,
+    height: Math.round((r.y + r.height) * scale) - y
+  };
+}
+
+/**
+ * 离屏渲染容器自身的背景（填充、描边、圆角、效果），不包含子节点。
+ * 使用临时矩形节点渲染后立即删除，不修改原文档。
+ * 返回 PNG 以及 PNG 左上角相对容器布局框左上角的偏移（Figma 单位）。
+ */
+async function renderContainerBackground(
+  node: SceneNode,
+  scale: number
+): Promise<{ bytes: Uint8Array; offsetX: number; offsetY: number } | null> {
+  if (!hasOwnPaint(node)) return null;
+  const src = node as FrameNode;
+  let rect: RectangleNode | null = null;
+  try {
+    rect = figma.createRectangle();
+    rect.resize(Math.max(0.01, src.width), Math.max(0.01, src.height));
+    rect.fills = src.fills;
+    if ('strokes' in src) {
+      rect.strokes = src.strokes;
+      rect.strokeAlign = src.strokeAlign;
+      if (src.strokeWeight !== figma.mixed) {
+        rect.strokeWeight = src.strokeWeight;
+      } else {
+        rect.strokeTopWeight = src.strokeTopWeight;
+        rect.strokeRightWeight = src.strokeRightWeight;
+        rect.strokeBottomWeight = src.strokeBottomWeight;
+        rect.strokeLeftWeight = src.strokeLeftWeight;
+      }
+      if (Array.isArray(src.dashPattern)) rect.dashPattern = src.dashPattern;
+    }
+    if ('cornerRadius' in src) {
+      if (src.cornerRadius !== figma.mixed) {
+        rect.cornerRadius = src.cornerRadius;
+      } else {
+        rect.topLeftRadius = src.topLeftRadius;
+        rect.topRightRadius = src.topRightRadius;
+        rect.bottomLeftRadius = src.bottomLeftRadius;
+        rect.bottomRightRadius = src.bottomRightRadius;
+      }
+      if (typeof src.cornerSmoothing === 'number') rect.cornerSmoothing = src.cornerSmoothing;
+    }
+    if ('effects' in src && Array.isArray(src.effects)) rect.effects = src.effects;
+    if ('rotation' in src && src.rotation) rect.rotation = src.rotation;
+
+    const bytes = await rect.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+    const box = rect.absoluteBoundingBox;
+    const render = rect.absoluteRenderBounds;
+    const offsetX = box && render ? render.x - box.x : 0;
+    const offsetY = box && render ? render.y - box.y : 0;
+    return { bytes, offsetX, offsetY };
+  } catch (err) {
+    console.warn(`容器 ${node.name} 背景渲染失败:`, err);
+    return null;
+  } finally {
+    if (rect) rect.remove();
+  }
+}
+
 export async function handleExportPSD(nodeId: string, scale: number = 1, exportMode: string = 'hierarchical'): Promise<void> {
-  const targetNode = figma.getNodeById(nodeId) as FrameNode;
+  // getNodeById 已废弃，且在 documentAccess: dynamic-page 下会直接抛异常
+  const targetNode = (await figma.getNodeByIdAsync(nodeId)) as FrameNode | null;
 
   if (!targetNode) {
     figma.ui.postMessage({ type: 'error', message: '找不到指定的画板/图层' });
@@ -67,12 +97,18 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
     return;
   }
 
+  const docWidth = Math.round(rootBounds.width * scale);
+  const docHeight = Math.round(rootBounds.height * scale);
+
   figma.ui.postMessage({ type: 'status', status: '导出主画板全局预览图像中...' });
 
-  // 1. 导出主画板全量图像快照（用于全局视口预览）
+  // 1. 导出主画板全量图像快照（用于全局视口预览）。
+  //    useAbsoluteBounds：严格按画板布局框导出。默认导出会把画板外阴影/外描边算进去，
+  //    导致 PSD 文档尺寸变大、所有图层相对合成图错位。
   const rootCompositeBytes = await targetNode.exportAsync({
     format: 'PNG',
-    constraint: { type: 'SCALE', value: scale }
+    constraint: { type: 'SCALE', value: scale },
+    useAbsoluteBounds: true
   });
   const rootCompositeBase64 = uint8ToBase64(rootCompositeBytes);
 
@@ -96,8 +132,8 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
       blendMode: 'normal',
       x: 0,
       y: 0,
-      width: Math.round(rootBounds.width * scale),
-      height: Math.round(rootBounds.height * scale),
+      width: docWidth,
+      height: docHeight,
       parentId: null,
       pngBase64: rootCompositeBase64
     });
@@ -106,8 +142,8 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
 
     const payloadRootMerge: ExportDataPayload = {
       artboardName: rootLayerName,
-      width: Math.round(rootBounds.width * scale),
-      height: Math.round(rootBounds.height * scale),
+      width: docWidth,
+      height: docHeight,
       scale: scale,
       rootCompositePngBase64: rootCompositeBase64,
       layers: exportLayers
@@ -117,29 +153,11 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
     return;
   }
 
-  // 2b. 独立背景图层渲染（离屏临时节点）
-  let hasBackground = false;
-  if ('fills' in targetNode && Array.isArray(targetNode.fills) && targetNode.fills.length > 0) {
-    const visibleFills = targetNode.fills.filter(f => f.visible !== false);
-    if (visibleFills.length > 0) {
-      hasBackground = true;
-    }
-  }
-
-  if (hasBackground) {
+  // 2b. 根画板背景图层（离屏临时节点渲染）
+  if (hasOwnPaint(targetNode)) {
     figma.ui.postMessage({ type: 'status', status: '正在单独渲染画板背景图层...' });
-
-    let tempBgRect: RectangleNode | null = null;
-    try {
-      tempBgRect = figma.createRectangle();
-      tempBgRect.resize(targetNode.width, targetNode.height);
-      tempBgRect.fills = targetNode.fills;
-
-      const bgPngBytes = await tempBgRect.exportAsync({
-        format: 'PNG',
-        constraint: { type: 'SCALE', value: scale }
-      });
-
+    const bg = await renderContainerBackground(targetNode, scale);
+    if (bg) {
       exportLayers.push({
         id: targetNode.id + '_bg',
         name: '背景',
@@ -148,19 +166,13 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
         visible: true,
         opacity: 1,
         blendMode: 'normal',
-        x: 0,
-        y: 0,
-        width: Math.round(rootBounds.width * scale),
-        height: Math.round(rootBounds.height * scale),
+        x: Math.round(bg.offsetX * scale),
+        y: Math.round(bg.offsetY * scale),
+        width: docWidth,
+        height: docHeight,
         parentId: null,
-        pngBase64: uint8ToBase64(bgPngBytes)
+        pngBase64: uint8ToBase64(bg.bytes)
       });
-    } catch (err) {
-      console.warn('纯背景渲染失败:', err);
-    } finally {
-      if (tempBgRect) {
-        tempBgRect.remove();
-      }
     }
   }
 
@@ -184,21 +196,58 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
       layerName: item.name
     });
 
+    const common = {
+      id: item.id,
+      name: item.name,
+      visible: item.visible,
+      opacity: item.opacity !== undefined ? item.opacity : 1,
+      width: Math.round(item.width * scale),
+      height: Math.round(item.height * scale),
+      parentId: item.parentId,
+      clip: scaleRect(item.clip, scale)
+    };
+
     if (item.isGroup) {
-      exportLayers.push({
-        id: item.id,
-        name: item.name,
+      const groupLayer: ExportLayerPayload = {
+        ...common,
         kind: 'group',
         isGroup: true,
-        visible: item.visible,
-        opacity: item.opacity !== undefined ? item.opacity : 1,
-        blendMode: convertBlendMode(getNodeBlendMode(item.node), true),
+        blendMode: item.maskNode ? 'pass through' : convertBlendMode(getNodeBlendMode(item.node), true),
         x: Math.round(item.x * scale),
-        y: Math.round(item.y * scale),
-        width: Math.round(item.width * scale),
-        height: Math.round(item.height * scale),
-        parentId: item.parentId
-      });
+        y: Math.round(item.y * scale)
+      };
+
+      // Figma 蒙版：导出蒙版节点自身像素，作为组蒙版
+      if (item.maskNode) {
+        try {
+          const maskBytes = await item.maskNode.exportAsync({
+            format: 'PNG',
+            constraint: { type: 'SCALE', value: scale }
+          });
+          groupLayer.maskPngBase64 = uint8ToBase64(maskBytes);
+          groupLayer.maskX = Math.round(item.renderX * scale);
+          groupLayer.maskY = Math.round(item.renderY * scale);
+          groupLayer.maskLuminance = 'maskType' in item.maskNode &&
+            (item.maskNode as BlendMixin).maskType === 'LUMINANCE';
+        } catch (err) {
+          console.warn(`蒙版 ${item.name} 导出失败:`, err);
+        }
+      }
+
+      exportLayers.push(groupLayer);
+    } else if (item.isBackground) {
+      const bg = await renderContainerBackground(item.node, scale);
+      if (bg) {
+        exportLayers.push({
+          ...common,
+          kind: 'image',
+          isGroup: false,
+          blendMode: 'normal',
+          x: Math.round((item.x + bg.offsetX) * scale),
+          y: Math.round((item.y + bg.offsetY) * scale),
+          pngBase64: uint8ToBase64(bg.bytes)
+        });
+      }
     } else if (item.kind === 'text') {
       // TEXT 节点：解析原生可编辑文本属性（TySh），同时导出 PNG 作为栅格预览
       //（Photoshop 文本图层本身就同时包含像素与 TySh 描述符，二者缺一不可）
@@ -211,9 +260,13 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
 
       let textPngBase64: string | undefined = undefined;
       try {
+        // useAbsoluteBounds：PNG 与文本框（absoluteBoundingBox）完全对齐。
+        // 默认导出会裁切到字形实际像素，PNG 左上角不再是文本框左上角，
+        // 既会让预览像素错位，也会让 UI 端基于 PNG 的基线检测整体偏移。
         const pngBytes = await item.node.exportAsync({
           format: 'PNG',
-          constraint: { type: 'SCALE', value: scale }
+          constraint: { type: 'SCALE', value: scale },
+          useAbsoluteBounds: true
         });
         textPngBase64 = uint8ToBase64(pngBytes);
       } catch (pngErr) {
@@ -221,23 +274,17 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
       }
 
       exportLayers.push({
-        id: item.id,
-        name: item.name,
+        ...common,
         kind: 'text',
         isGroup: false,
         textData: textData,
-        visible: item.visible,
-        opacity: item.opacity !== undefined ? item.opacity : 1,
         blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
         x: Math.round(item.x * scale),
         y: Math.round(item.y * scale),
-        width: Math.round(item.width * scale),
-        height: Math.round(item.height * scale),
-        parentId: item.parentId,
         pngBase64: textPngBase64
       });
     } else {
-      // 非 TEXT 节点（图片/形状）：继续保持 Canvas PNG 导出机制
+      // 非 TEXT 节点（图片/形状/合并容器）：PNG 按渲染范围裁切，因此用 renderX/renderY 定位
       try {
         const pngBytes = await item.node.exportAsync({
           format: 'PNG',
@@ -245,18 +292,12 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
         });
 
         exportLayers.push({
-          id: item.id,
-          name: item.name,
+          ...common,
           kind: item.kind,
           isGroup: false,
-          visible: item.visible,
-          opacity: item.opacity !== undefined ? item.opacity : 1,
           blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
-          x: Math.round(item.x * scale),
-          y: Math.round(item.y * scale),
-          width: Math.round(item.width * scale),
-          height: Math.round(item.height * scale),
-          parentId: item.parentId,
+          x: Math.round(item.renderX * scale),
+          y: Math.round(item.renderY * scale),
           pngBase64: uint8ToBase64(pngBytes)
         });
       } catch (err) {
@@ -267,8 +308,8 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
 
   const payload: ExportDataPayload = {
     artboardName: targetNode.name,
-    width: Math.round(rootBounds.width * scale),
-    height: Math.round(rootBounds.height * scale),
+    width: docWidth,
+    height: docHeight,
     scale: scale,
     rootCompositePngBase64: rootCompositeBase64,
     layers: exportLayers

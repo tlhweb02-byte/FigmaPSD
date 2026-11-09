@@ -375,6 +375,120 @@
       }
     }
 
+    function intersectRect(a, b) {
+      if (!a) return b;
+      if (!b) return a;
+      const x = Math.max(a.x, b.x);
+      const y = Math.max(a.y, b.y);
+      const r = Math.min(a.x + a.width, b.x + b.width);
+      const btm = Math.min(a.y + a.height, b.y + b.height);
+      return { x: x, y: y, width: Math.max(0, r - x), height: Math.max(0, btm - y) };
+    }
+
+    function rectContains(outer, inner) {
+      return inner.x >= outer.x && inner.y >= outer.y &&
+        inner.x + inner.width <= outer.x + outer.width &&
+        inner.y + inner.height <= outer.y + outer.height;
+    }
+
+    /**
+     * 生成 ag-psd 图层蒙版（文档坐标，蒙版外区域 defaultColor=0 即隐藏）。
+     * - clip：clipsContent 画板的裁切矩形
+     * - maskInfo：Figma 蒙版节点的渲染像素 { canvas, x, y, luminance }
+     * - layerRect：普通图层自身像素范围（用于判断是否需要蒙版、缩小蒙版尺寸）
+     * 返回 { mask } / { none: true }（无需蒙版）/ { empty: true }（完全被裁掉）
+     */
+    function buildLayerMask(clip, maskInfo, layerRect) {
+      if (!clip && !maskInfo) return { none: true };
+      let area = maskInfo
+        ? { x: maskInfo.x, y: maskInfo.y, width: maskInfo.canvas.width, height: maskInfo.canvas.height }
+        : null;
+      if (clip) area = intersectRect(area, clip);
+      if (layerRect) {
+        if (!maskInfo && rectContains(clip, layerRect)) return { none: true };
+        area = intersectRect(area, layerRect);
+      }
+      const w = Math.round(area.width);
+      const h = Math.round(area.height);
+      if (w <= 0 || h <= 0) return { empty: true };
+
+      const out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      const octx = out.getContext('2d');
+      const img = octx.createImageData(w, h);
+      const src = maskInfo
+        ? maskInfo.canvas.getContext('2d').getImageData(area.x - maskInfo.x, area.y - maskInfo.y, w, h).data
+        : null;
+      for (let i = 0; i < w * h; i++) {
+        let v = 255;
+        if (src) {
+          const a = src[i * 4 + 3];
+          v = maskInfo.luminance
+            ? Math.round((0.299 * src[i * 4] + 0.587 * src[i * 4 + 1] + 0.114 * src[i * 4 + 2]) * a / 255)
+            : a;
+        }
+        // ag-psd 取红色通道作为蒙版灰度；alpha 必须为 255，避免预乘导致数值失真
+        img.data[i * 4] = v;
+        img.data[i * 4 + 1] = v;
+        img.data[i * 4 + 2] = v;
+        img.data[i * 4 + 3] = 255;
+      }
+      octx.putImageData(img, 0, 0);
+      return {
+        mask: { left: area.x, top: area.y, right: area.x + w, bottom: area.y + h, defaultColor: 0, canvas: out }
+      };
+    }
+
+    function to255(v) {
+      return v <= 1 ? Math.round(v * 255) : Math.round(v);
+    }
+
+    /** 由 run 样式（text.ts 中的 PsdTextRun）构建 ag-psd 文字样式 */
+    function buildTextStyle(run) {
+      const c = run.color || { r: 0, g: 0, b: 0, a: 1 };
+      const color = { r: to255(c.r), g: to255(c.g), b: to255(c.b) };
+      const hasLeading = typeof run.leading === 'number' && run.leading > 0;
+      return {
+        font: {
+          name: run.fontName || 'ArialMT',
+          script: run.fontScript || 0,
+          type: run.fontType || 0,
+          synthetic: 0
+        },
+        fontSize: run.fontSize || 16,
+        autoLeading: !hasLeading,
+        leading: hasLeading ? run.leading : 0,
+        tracking: run.tracking || 0,
+        fauxBold: false,
+        fauxItalic: false,
+        underline: !!run.underline,
+        strikethrough: !!run.strikethrough,
+        fontCaps: run.fontCaps || 0,
+        autoKerning: true,
+        kerning: 0,
+        baselineShift: 0,
+        fillColor: color,
+        strokeColor: color,
+        fillFlag: true,
+        strokeFlag: false,
+        fillFirst: true,
+        horizontalScale: 1,
+        verticalScale: 1,
+        ligatures: true,
+        baselineDirection: 2,
+        styleRunAlignment: 2,
+        language: 0,
+        noBreak: false,
+        yUnderline: 1,
+        outlineWidth: 1,
+        characterDirection: 0,
+        hindiNumbers: false,
+        kashida: 1,
+        diacriticPos: 2
+      };
+    }
+
     async function generatePsdFile(data) {
       if (typeof agPsd === 'undefined') {
         throw new Error('ag-psd 库未能成功加载');
@@ -384,8 +498,9 @@
       const exportScale = (typeof scale === 'number' && scale > 0) ? scale : 1;
 
       const { canvas: rootCanvas } = await base64ToCanvasOnly(rootCompositePngBase64, 'RootComposite');
-      const docWidth = rootCanvas.width;
-      const docHeight = rootCanvas.height;
+      // 文档尺寸以主线程计算的画板尺寸为准（合成图按画板布局框导出，二者一致）
+      const docWidth = data.width || rootCanvas.width;
+      const docHeight = data.height || rootCanvas.height;
 
       const layerMap = new Map();
       const rootChildren = [];
@@ -407,39 +522,44 @@
           if (typeof layer.opacity === 'number' && layer.opacity < 0.99) {
             groupObj.opacity = layer.opacity;
           }
+
+          // 组蒙版：clipsContent 裁切 和/或 Figma 蒙版节点
+          let maskInfo = null;
+          if (layer.maskPngBase64) {
+            const res = await base64ToCanvasOnly(layer.maskPngBase64, layer.name + '_mask');
+            maskInfo = { canvas: res.canvas, x: layer.maskX || 0, y: layer.maskY || 0, luminance: !!layer.maskLuminance };
+          }
+          const m = buildLayerMask(layer.clip || null, maskInfo, null);
+          if (m.mask) groupObj.mask = m.mask;
+          else if (m.empty) groupObj.hidden = true;
+
           layerMap.set(layer.id, groupObj);
         } else if (layer.kind === 'text' && layer.textData) {
+          const td = layer.textData;
           const left = Math.round(layer.x);
           const top = Math.round(layer.y);
           const right = left + Math.round(layer.width);
           const bottom = top + Math.round(layer.height);
-
-          const c = layer.textData.color;
-          const rVal = c.r <= 1 ? Math.round(c.r * 255) : Math.round(c.r);
-          const gVal = c.g <= 1 ? Math.round(c.g * 255) : Math.round(c.g);
-          const bVal = c.b <= 1 ? Math.round(c.b * 255) : Math.round(c.b);
 
           // ---- 文本定位（已对照真实 PS 导出文件验证）----
           // Photoshop 对 point 文本用 TySh transform 的平移量作为"基线原点"：
           //   基线 y = 框顶 + 基线偏移（渲染像素）
           // 而 TySh 描述符里的 text.left/top/right/bottom 在真实 PS 文件中全部为 0，
           // 写入图层边界会导致 Photoshop 重新排版时产生水平偏移。
-          const fontSizePt = layer.textData.fontSize || 16; // pt，与 Figma px 数值一致
-          const fontSizeScaled = layer.textData.fontSizeScaled || (fontSizePt * exportScale); // 渲染像素字号
-          const ascentRatio = (typeof layer.textData.ascentRatio === 'number' && layer.textData.ascentRatio > 0)
-            ? layer.textData.ascentRatio
+          const fontSizeScaled = td.fontSizeScaled || ((td.fontSize || 16) * exportScale); // 渲染像素字号
+          const ascentRatio = (typeof td.ascentRatio === 'number' && td.ascentRatio > 0)
+            ? td.ascentRatio
             : 0.88;
-          const descentRatio = (typeof layer.textData.descentRatio === 'number' && layer.textData.descentRatio > 0 && layer.textData.descentRatio < 1)
-            ? layer.textData.descentRatio
+          const descentRatio = (typeof td.descentRatio === 'number' && td.descentRatio > 0 && td.descentRatio < 1)
+            ? td.descentRatio
             : 0.2;
-          const shapeType = layer.textData.shapeType === 'box' ? 'box' : 'point';
+          const shapeType = td.shapeType === 'box' ? 'box' : 'point';
 
           // 用字体度量估算的基线（对比报告用）
           const estimatedBaselineY = top + Math.round(fontSizeScaled * ascentRatio);
 
           // ---- 精确基线：用 PNG 预览检测文字实际像素边界（Figma 逐像素渲染）----
-          // ink bottom 即文字实际底部：无 descender 文本（数字/大写/CJK）≈ 基线；
-          // 含 descender 文本（g j p q y）的 ink bottom = 基线 + descender 深度。
+          // 文本 PNG 按文本框（useAbsoluteBounds）导出，PNG 左上角 = 文本框左上角。
           let textCanvas = null;
           if (layer.pngBase64) {
             const res = await base64ToCanvasOnly(layer.pngBase64, layer.name);
@@ -450,49 +570,70 @@
           let baselineY = estimatedBaselineY;
           let baselineMethod = 'font-metrics';
           if (ink && shapeType === 'point') {
-            // 判断文本是否含 descender 字符（小写 g j p q y）
-            const hasDescender = /[gjpqy]/.test(layer.textData.text || '');
-            const descenderPx = Math.round(fontSizeScaled * descentRatio);
-            // ink bottom 相对 PNG 顶部；PNG 顶部即图层框 top
-            baselineY = hasDescender ? (top + ink.bottom - descenderPx) : (top + ink.bottom);
-            baselineMethod = 'ink-detect';
+            if (td.multiLine) {
+              // 多行文本：transform 基线是"首行"基线，ink.bottom 是末行底部，不能用；
+              // 改为 首行视觉顶部(ink.top) + 视觉顶部到基线的距离
+              baselineY = top + ink.top + Math.round(fontSizeScaled * ascentRatio);
+              baselineMethod = 'ink-top';
+            } else {
+              // ink bottom 即文字实际底部：无 descender 文本（数字/大写）≈ 基线；
+              // 含 descender 文本（g j p q y）的 ink bottom = 基线 + descender 深度。
+              const hasDescender = /[gjpqy]/.test(td.text || '');
+              const descenderPx = Math.round(fontSizeScaled * descentRatio);
+              baselineY = hasDescender ? (top + ink.bottom - descenderPx) : (top + ink.bottom);
+              baselineMethod = 'ink-detect';
+            }
           }
 
-          // 水平锚点：左对齐=左边，居中=中心，右对齐=右边；有 ink 时按实际像素修正
-          const just = layer.textData.align || 'left';
+          // 水平锚点：左对齐=文本框左边，居中=中心，右对齐=右边。
+          // Figma 自动宽度文本框恰好包住字符前进宽度，与 PS 对齐锚点语义一致；
+          // 不用 ink 边界（会把字形左侧留白算进偏移，导致文字整体右移 1~2px）。
+          const just = td.align || 'left';
           let anchorX = left;
           if (just === 'center') anchorX = Math.round((left + right) / 2);
           else if (just === 'right') anchorX = right;
-          if (ink && shapeType === 'point') {
-            // 左对齐锚点在 ink left；居中锚点在 ink 中心；右对齐锚点在 ink right
-            if (just === 'left') anchorX = left + ink.left;
-            else if (just === 'right') anchorX = left + ink.right;
-            else anchorX = left + Math.round((ink.left + ink.right) / 2);
-          }
 
           // 位置对比报告
           positionReport.push({
             name: layer.name,
-            text: (layer.textData.text || '').slice(0, 24),
+            text: (td.text || '').slice(0, 24),
             figmaBox: { x: left, y: top, w: right - left, h: bottom - top },
             ink: ink,
             estimatedBaselineY: estimatedBaselineY,
             usedBaselineY: baselineY,
-            baselineMethod: baselineMethod,
+            baselineMethod: shapeType === 'box' ? 'box' : baselineMethod,
             anchorX: anchorX
           });
 
+          // Figma 固定宽度 + 自动高度文本：框高恰好等于 Figma 排版高度，PS 行距算法略有差异时
+          // 末行会被文本框截掉（不可见），因此 box 底部留出余量（顶部对齐，不影响位置）
+          const boxBottom = (shapeType === 'box' && td.autoHeight)
+            ? bottom + Math.max(2, Math.round(fontSizeScaled * 0.5))
+            : bottom;
+
+          const defaultRun = {
+            fontName: td.fontName,
+            fontScript: td.fontScript,
+            fontType: td.fontType,
+            fontSize: td.fontSize,
+            color: td.color,
+            tracking: td.letterSpacing,
+            leading: td.lineHeight,
+            underline: td.underline,
+            strikethrough: td.strikethrough,
+            fontCaps: td.fontCaps
+          };
+          const hasLeading = typeof td.lineHeight === 'number' && td.lineHeight > 0;
+
           const textObj = {
-            text: layer.textData.text,
-            // box 文本：TySh 文本框边界 = boxBounds 绝对坐标（已在下方 boxBounds 设置），
-            // 这里 text.left/top/right/bottom 也填 box 边界（ag-psd 会写入 TySh）。
+            text: td.text,
             // 关键：box 文本 transform 必须用单位阵 [1,0,0,1,0,0]！
             // 若 transform 平移量写 (left,top) 且 boxBounds 也写绝对坐标，Photoshop
             // 会把两者叠加成 2 倍偏移（实测 box-B 渲染到 (144,1404) 而非 (72,702)）。
             left: shapeType === 'box' ? left : 0,
             top: shapeType === 'box' ? top : 0,
             right: shapeType === 'box' ? right : 0,
-            bottom: shapeType === 'box' ? bottom : 0,
+            bottom: shapeType === 'box' ? boxBottom : 0,
             transform: shapeType === 'box'
               ? [1, 0, 0, 1, 0, 0]
               : [1, 0, 0, 1, anchorX, baselineY],
@@ -501,45 +642,10 @@
             gridding: 'none',
             orientation: 'horizontal',
             index: 0,
-            style: {
-              font: {
-                name: layer.textData.fontName || 'ArialMT',
-                script: layer.textData.fontScript || 0,
-                type: layer.textData.fontType || 0,
-                synthetic: 0
-              },
-              fontSize: fontSizePt,
-              autoLeading: !layer.textData.lineHeight,
-              leading: layer.textData.lineHeight || 0,
-              tracking: layer.textData.letterSpacing || 0,
-              fauxBold: !!layer.textData.fauxBold,
-              fauxItalic: !!layer.textData.fauxItalic,
-              underline: !!layer.textData.underline,
-              strikethrough: !!layer.textData.strikethrough,
-              autoKerning: true,
-              kerning: 0,
-              baselineShift: 0,
-              fillColor: { r: rVal, g: gVal, b: bVal },
-              strokeColor: { r: rVal, g: gVal, b: bVal },
-              fillFlag: true,
-              strokeFlag: false,
-              fillFirst: true,
-              horizontalScale: 1,
-              verticalScale: 1,
-              ligatures: true,
-              baselineDirection: 2,
-              styleRunAlignment: 2,
-              language: 0,
-              noBreak: false,
-              yUnderline: 1,
-              outlineWidth: 1,
-              characterDirection: 0,
-              hindiNumbers: false,
-              kashida: 1,
-              diacriticPos: 2
-            },
+            style: buildTextStyle(defaultRun),
             paragraphStyle: {
-              justification: layer.textData.align || 'left',
+              // point 文本不支持两端对齐，退回左对齐
+              justification: (shapeType === 'point' && just === 'justify-all') ? 'left' : just,
               firstLineIndent: 0,
               startIndent: 0,
               endIndent: 0,
@@ -554,7 +660,7 @@
               wordSpacing: [0.8, 1, 1.33],
               letterSpacing: [0, 0, 0],
               glyphSpacing: [1, 1, 1],
-              autoLeading: layer.textData.lineHeight ? 1 : 1.2,
+              autoLeading: hasLeading ? 1 : 1.2,
               leadingType: 0,
               hanging: false,
               burasagari: false,
@@ -565,9 +671,8 @@
 
           // box 文本：给出精确文本框边界（文档坐标），并设置垂直对齐
           if (shapeType === 'box') {
-            textObj.boxBounds = [left, top, right, bottom];
-            textObj.pointBase = undefined;
-            if (layer.textData.textAlignVertical === 'center') {
+            textObj.boxBounds = [left, top, right, boxBottom];
+            if (td.textAlignVertical === 'center') {
               // 垂直居中对齐：box 文本需要 leading 撑开
               textObj.paragraphStyle.leadingType = 2;
             }
@@ -575,18 +680,11 @@
             textObj.pointBase = [0, 0];
           }
 
-          // 字体回退 run：拉丁字体文本中的 ￥/中文/全角符号 使用 CJK 字体（避免空心方块）
-          if (layer.textData.styleRuns && layer.textData.styleRuns.length) {
-            textObj.styleRuns = layer.textData.styleRuns.map(run => ({
+          // 多样式 run：混合字体/字号/颜色/字距/装饰，以及拉丁字体中的 ￥/中文 回退到 CJK 字体
+          if (td.styleRuns && td.styleRuns.length) {
+            textObj.styleRuns = td.styleRuns.map(run => ({
               length: run.length,
-              style: {
-                font: {
-                  name: run.fontName || 'SimSun',
-                  script: run.fontScript || 3,
-                  type: run.fontType || 2,
-                  synthetic: 0
-                }
-              }
+              style: buildTextStyle(run)
             }));
           }
 
@@ -601,13 +699,18 @@
             text: textObj
           };
 
-          if (typeof layer.opacity === 'number' && layer.opacity < 0.99) {
-            textLayerObj.opacity = layer.opacity;
+          // 文字填充透明度（Figma fill opacity）在 PS 文字样式中无对应字段，叠加到图层不透明度
+          const fillAlpha = (td.color && typeof td.color.a === 'number') ? td.color.a : 1;
+          const layerOpacity = (typeof layer.opacity === 'number' ? layer.opacity : 1) * fillAlpha;
+          if (layerOpacity < 0.99) {
+            textLayerObj.opacity = layerOpacity;
           }
 
           // 文本图层同时附带栅格预览像素（Photoshop 文本图层本身既含像素也含 TySh）
           if (textCanvas) {
             textLayerObj.canvas = textCanvas;
+            textLayerObj.right = left + textCanvas.width;
+            textLayerObj.bottom = top + textCanvas.height;
           } else {
             // 文本像素缺失时仍提供正确尺寸的透明画布，保证图层记录边界有效
             const emptyCanvas = document.createElement('canvas');
@@ -616,14 +719,26 @@
             textLayerObj.canvas = emptyCanvas;
           }
 
+          const m = buildLayerMask(layer.clip || null, null, {
+            x: left, y: top, width: textLayerObj.right - left, height: textLayerObj.bottom - top
+          });
+          if (m.empty) continue;
+          if (m.mask) textLayerObj.mask = m.mask;
+
           layerMap.set(layer.id, textLayerObj);
         } else {
+          if (!layer.pngBase64) continue;
           const { canvas } = await base64ToCanvasOnly(layer.pngBase64, layer.name);
 
           const left = Math.round(layer.x);
           const top = Math.round(layer.y);
           const right = left + canvas.width;
           const bottom = top + canvas.height;
+
+          const m = buildLayerMask(layer.clip || null, null, {
+            x: left, y: top, width: canvas.width, height: canvas.height
+          });
+          if (m.empty) continue; // 完全落在裁切区域外，Figma 中不可见
 
           const layerObj = {
             name: layer.name,
@@ -635,6 +750,7 @@
             bottom: bottom,
             canvas: canvas
           };
+          if (m.mask) layerObj.mask = m.mask;
 
           if (typeof layer.opacity === 'number' && layer.opacity < 0.99) {
             layerObj.opacity = layer.opacity;

@@ -20,59 +20,143 @@
   function isContainerType(node) {
     return node.type === "FRAME" || node.type === "GROUP" || node.type === "COMPONENT" || node.type === "INSTANCE" || node.type === "SECTION";
   }
-  function collectNodes(node, rootNode, rootBounds, result, exportMode, parentId = null) {
-    if (!node.visible && node !== rootNode) return;
-    const isRoot = node === rootNode;
-    if (!isRoot) {
-      const bounds = node.absoluteBoundingBox;
-      if (!bounds || bounds.width === 0 || bounds.height === 0) return;
-      const relX = bounds.x - rootBounds.x;
-      const relY = bounds.y - rootBounds.y;
-      const wantsMerge = isContainerType(node) && typeof node.name === "string" && node.name.endsWith(MERGE_SUFFIX);
-      const layerName = wantsMerge ? node.name.slice(0, -MERGE_SUFFIX.length) : node.name;
-      const isContainer = isContainerType(node) && !wantsMerge && exportMode === "hierarchical";
-      const opacity = "opacity" in node && typeof node.opacity === "number" ? node.opacity : 1;
-      if (isContainer && "children" in node && node.children.length > 0) {
+  function hasOwnPaint(node) {
+    if (node.type === "GROUP") return false;
+    const visiblePaint = (paints) => Array.isArray(paints) && paints.some((p) => p.visible !== false && (p.opacity === void 0 || p.opacity > 0));
+    const fills = "fills" in node ? node.fills : void 0;
+    const strokes = "strokes" in node ? node.strokes : void 0;
+    return visiblePaint(fills) || visiblePaint(strokes);
+  }
+  function intersectRect(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    const x = Math.max(a.x, b.x);
+    const y = Math.max(a.y, b.y);
+    const r = Math.min(a.x + a.width, b.x + b.width);
+    const btm = Math.min(a.y + a.height, b.y + b.height);
+    return { x, y, width: Math.max(0, r - x), height: Math.max(0, btm - y) };
+  }
+  function toRel(rect, rootBounds) {
+    return { x: rect.x - rootBounds.x, y: rect.y - rootBounds.y, width: rect.width, height: rect.height };
+  }
+  function getOpacity(node) {
+    return "opacity" in node && typeof node.opacity === "number" ? node.opacity : 1;
+  }
+  function collectNodes(node, rootNode, rootBounds, result, exportMode, parentId = null, clip = null) {
+    if (node === rootNode) {
+      if ("children" in node) {
+        collectChildren(node.children, rootNode, rootBounds, result, exportMode, null, null);
+      }
+      return;
+    }
+    if (!node.visible) return;
+    const bounds = node.absoluteBoundingBox;
+    const renderBounds = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : bounds;
+    if (!bounds || !renderBounds || renderBounds.width <= 0 || renderBounds.height <= 0) return;
+    const rel = toRel(bounds, rootBounds);
+    const relRender = toRel(renderBounds, rootBounds);
+    if (clip) {
+      const vis = intersectRect(clip, relRender);
+      if (!vis || vis.width <= 0 || vis.height <= 0) return;
+    }
+    const wantsMerge = isContainerType(node) && typeof node.name === "string" && node.name.endsWith(MERGE_SUFFIX);
+    const layerName = wantsMerge ? node.name.slice(0, -MERGE_SUFFIX.length) : node.name;
+    const expand = isContainerType(node) && !wantsMerge && "children" in node;
+    const base = {
+      visible: node.visible,
+      x: rel.x,
+      y: rel.y,
+      width: bounds.width,
+      height: bounds.height,
+      renderX: relRender.x,
+      renderY: relRender.y,
+      node
+    };
+    if (!expand) {
+      result.push({
+        ...base,
+        id: node.id,
+        name: layerName,
+        kind: inferKind(node),
+        isGroup: false,
+        opacity: getOpacity(node),
+        parentId,
+        clip
+      });
+      return;
+    }
+    const ownClip = "clipsContent" in node && node.clipsContent ? rel : null;
+    const hierarchical = exportMode === "hierarchical";
+    let childParent = parentId;
+    let childClip;
+    if (hierarchical) {
+      result.push({
+        ...base,
+        id: node.id,
+        name: layerName,
+        kind: "group",
+        isGroup: true,
+        opacity: getOpacity(node),
+        parentId,
+        clip: intersectRect(clip, ownClip)
+      });
+      childParent = node.id;
+      childClip = null;
+    } else {
+      childClip = intersectRect(clip, ownClip);
+    }
+    if (hasOwnPaint(node)) {
+      result.push({
+        ...base,
+        id: node.id + "_bg",
+        name: layerName + " \u80CC\u666F",
+        kind: "image",
+        isGroup: false,
+        // 平铺模式下容器的不透明度无法落到组上，叠加到背景图层
+        opacity: hierarchical ? 1 : getOpacity(node),
+        parentId: childParent,
+        // 背景不受自身 clipsContent 裁切（外阴影/外描边要保留），只受祖先裁切
+        clip: hierarchical ? null : clip,
+        isBackground: true
+      });
+    }
+    collectChildren(node.children, rootNode, rootBounds, result, exportMode, childParent, childClip);
+  }
+  function collectChildren(children, rootNode, rootBounds, result, exportMode, parentId, clip) {
+    let currentParent = parentId;
+    let currentClip = clip;
+    for (const child of children) {
+      if ("isMask" in child && child.isMask) {
+        if (!child.visible) continue;
+        const bounds = child.absoluteBoundingBox;
+        const renderBounds = child.absoluteRenderBounds;
+        if (!bounds || !renderBounds) continue;
+        const rel = toRel(bounds, rootBounds);
+        const relRender = toRel(renderBounds, rootBounds);
+        const groupId = child.id + "_maskgroup";
         result.push({
-          id: node.id,
-          name: layerName,
+          id: groupId,
+          name: child.name + " (\u8499\u7248)",
           kind: "group",
           isGroup: true,
-          visible: node.visible,
-          opacity,
-          x: relX,
-          y: relY,
+          visible: true,
+          opacity: 1,
+          x: rel.x,
+          y: rel.y,
           width: bounds.width,
           height: bounds.height,
+          renderX: relRender.x,
+          renderY: relRender.y,
           parentId,
-          node
+          node: child,
+          clip,
+          maskNode: child
         });
-        for (const child of node.children) {
-          collectNodes(child, rootNode, rootBounds, result, exportMode, node.id);
-        }
-        return;
-      } else {
-        result.push({
-          id: node.id,
-          name: layerName,
-          kind: inferKind(node),
-          isGroup: false,
-          visible: node.visible,
-          opacity,
-          x: relX,
-          y: relY,
-          width: bounds.width,
-          height: bounds.height,
-          parentId,
-          node
-        });
-        return;
+        currentParent = groupId;
+        currentClip = null;
+        continue;
       }
-    }
-    if ("children" in node) {
-      for (const child of node.children) {
-        collectNodes(child, rootNode, rootBounds, result, exportMode, null);
-      }
+      collectNodes(child, rootNode, rootBounds, result, exportMode, currentParent, currentClip);
     }
   }
 
@@ -13464,112 +13548,187 @@
     }
     return { name: "SimSun", script: 3, type: 2 };
   }
-  function buildFontRuns(text, primaryIsCjk, primaryFont, fallbackFont) {
-    if (!text || primaryIsCjk) return void 0;
+  function splitByFontFallback(text, primaryIsCjk, primaryFont, fallbackFont) {
+    if (!text) return [];
+    if (primaryIsCjk) return [{ length: text.length, font: primaryFont }];
     const runs = [];
-    let currentFont = null;
-    let currentLen = 0;
-    for (const ch of text) {
-      const needsFallback = isCjkFallbackChar(ch.charCodeAt(0));
-      const font = needsFallback ? fallbackFont : primaryFont;
-      if (currentFont && currentFont.name === font.name) {
-        currentLen++;
-      } else {
-        if (currentFont) runs.push({ length: currentLen, font: currentFont });
-        currentFont = font;
-        currentLen = 1;
-      }
+    let i = 0;
+    while (i < text.length) {
+      const code = text.codePointAt(i) || 0;
+      const unitLen = code > 65535 ? 2 : 1;
+      const font = isCjkFallbackChar(code) ? fallbackFont : primaryFont;
+      const last = runs[runs.length - 1];
+      if (last && last.font.name === font.name) last.length += unitLen;
+      else runs.push({ length: unitLen, font });
+      i += unitLen;
     }
-    if (currentFont) runs.push({ length: currentLen, font: currentFont });
-    const distinct = new Set(runs.map((r) => r.font.name));
-    if (distinct.size <= 1) return void 0;
-    return runs.map((r) => ({
-      length: r.length,
-      fontName: r.font.name,
-      fontScript: r.font.script,
-      fontType: r.font.type
-    }));
+    return runs;
+  }
+  function getSegments(node) {
+    try {
+      const segs = node.getStyledTextSegments([
+        "fontName",
+        "fontSize",
+        "fills",
+        "letterSpacing",
+        "lineHeight",
+        "textDecoration",
+        "textCase"
+      ]);
+      if (segs && segs.length) return segs;
+    } catch (err) {
+      console.warn("\u8BFB\u53D6\u6587\u672C\u6837\u5F0F\u5206\u6BB5\u5931\u8D25\uFF0C\u4F7F\u7528\u8282\u70B9\u7EA7\u6837\u5F0F:", err);
+    }
+    const pick = (v, d) => v === figma.mixed ? d : v;
+    return [{
+      characters: node.characters,
+      start: 0,
+      end: node.characters.length,
+      fontName: pick(node.fontName, { family: "Arial", style: "Regular" }),
+      fontSize: pick(node.fontSize, 16),
+      fills: pick(node.fills, []),
+      letterSpacing: pick(node.letterSpacing, { unit: "PIXELS", value: 0 }),
+      lineHeight: pick(node.lineHeight, { unit: "AUTO" }),
+      textDecoration: pick(node.textDecoration, "NONE"),
+      textCase: pick(node.textCase, "ORIGINAL")
+    }];
+  }
+  function round1(v) {
+    return Math.round(v * 10) / 10;
+  }
+  function solidColor(fills) {
+    const solid = Array.isArray(fills) ? fills.find((f) => f.visible !== false && f.type === "SOLID") : void 0;
+    if (!solid) return { r: 0, g: 0, b: 0, a: 1 };
+    return {
+      r: solid.color.r,
+      g: solid.color.g,
+      b: solid.color.b,
+      a: solid.opacity !== void 0 ? solid.opacity : 1
+    };
+  }
+  function toTracking(ls, fontSize) {
+    if (!ls || !ls.value) return 0;
+    if (ls.unit === "PERCENT") return Math.round(ls.value * 10);
+    return fontSize > 0 ? Math.round(ls.value / fontSize * 1e3) : 0;
+  }
+  function toLeading(lh, fontSize) {
+    if (!lh || lh.unit === "AUTO") return void 0;
+    if (lh.unit === "PERCENT") return round1(lh.value / 100 * fontSize);
+    return round1(lh.value);
+  }
+  function applyTextCase(chars, textCase) {
+    if (textCase === "UPPER") return { text: chars, fontCaps: 2 };
+    if (textCase === "SMALL_CAPS" || textCase === "SMALL_CAPS_FORCED") return { text: chars, fontCaps: 1 };
+    let out = chars;
+    if (textCase === "LOWER") out = chars.toLowerCase();
+    else if (textCase === "TITLE") out = chars.replace(/(^|[\s\-])(\S)/g, (_m, sep, c) => sep + c.toUpperCase());
+    return { text: out.length === chars.length ? out : chars, fontCaps: 0 };
+  }
+  function sameRunStyle(a, b) {
+    return a.fontName === b.fontName && a.fontSize === b.fontSize && a.tracking === b.tracking && a.leading === b.leading && a.underline === b.underline && a.strikethrough === b.strikethrough && a.fontCaps === b.fontCaps && a.color.r === b.color.r && a.color.g === b.color.g && a.color.b === b.color.b && a.color.a === b.color.a;
   }
   async function parseTextNode(node, scale, fallbackName) {
-    if (node.fontName !== figma.mixed) {
-      try {
-        await figma.loadFontAsync(node.fontName);
-      } catch (err) {
-        console.warn("\u5B57\u4F53\u9884\u52A0\u8F7D\u8DF3\u8FC7:", err);
+    const segments = getSegments(node);
+    const fallbackFont = pickCjkFallbackFont();
+    let text = "";
+    const runs = [];
+    let firstLineMax = null;
+    let inFirstLine = true;
+    for (const seg of segments) {
+      const family = seg.fontName.family || "Arial";
+      const style = seg.fontName.style || "Regular";
+      const fontSize = typeof seg.fontSize === "number" ? seg.fontSize : 16;
+      const isCjk = isCjkFont(family);
+      const primaryFont = { name: toPsdFontName(family, style), script: isCjk ? 3 : 0, type: isCjk ? 2 : 0 };
+      const cased = applyTextCase(seg.characters.replace(/\u2028/g, "\n"), seg.textCase);
+      text += cased.text;
+      if (inFirstLine) {
+        const nl = cased.text.indexOf("\n");
+        const lineText = nl >= 0 ? cased.text.slice(0, nl) : cased.text;
+        if (lineText.length && (!firstLineMax || fontSize > firstLineMax.size)) {
+          firstLineMax = { size: fontSize, family, style, text: lineText };
+        } else if (firstLineMax && fontSize === firstLineMax.size) {
+          firstLineMax.text += lineText;
+        }
+        if (nl >= 0) inFirstLine = false;
       }
-    }
-    let color = { r: 0, g: 0, b: 0, a: 1 };
-    if (Array.isArray(node.fills) && node.fills.length > 0) {
-      const solidFill = node.fills.find((f) => f.visible !== false && f.type === "SOLID");
-      if (solidFill) {
-        color = {
-          r: solidFill.color.r,
-          g: solidFill.color.g,
-          b: solidFill.color.b,
-          a: solidFill.opacity !== void 0 ? solidFill.opacity : 1
+      const decoration = seg.textDecoration;
+      const common = {
+        fontSize: round1(fontSize),
+        color: solidColor(seg.fills),
+        tracking: toTracking(seg.letterSpacing, fontSize),
+        leading: toLeading(seg.lineHeight, fontSize),
+        underline: decoration === "UNDERLINE",
+        strikethrough: decoration === "STRIKETHROUGH",
+        fontCaps: cased.fontCaps
+      };
+      for (const part of splitByFontFallback(cased.text, isCjk, primaryFont, fallbackFont)) {
+        const run = {
+          length: part.length,
+          fontName: part.font.name,
+          fontScript: part.font.script,
+          fontType: part.font.type,
+          ...common
         };
+        const last = runs[runs.length - 1];
+        if (last && sameRunStyle(last, run)) last.length += run.length;
+        else runs.push(run);
       }
     }
-    const fontObj = node.fontName !== figma.mixed ? node.fontName : { family: "Arial", style: "Regular" };
-    const fontSizeVal = typeof node.fontSize === "number" ? node.fontSize : 16;
+    if (!text) text = fallbackName;
+    const first = runs[0] || {
+      length: text.length,
+      fontName: "ArialMT",
+      fontScript: 0,
+      fontType: 0,
+      fontSize: 16,
+      color: { r: 0, g: 0, b: 0, a: 1 },
+      tracking: 0,
+      leading: void 0,
+      underline: false,
+      strikethrough: false,
+      fontCaps: 0
+    };
+    const firstSeg = segments[0];
+    const baseFamily = firstLineMax ? firstLineMax.family : firstSeg ? firstSeg.fontName.family : "Arial";
+    const baseStyle = firstLineMax ? firstLineMax.style : firstSeg ? firstSeg.fontName.style : "Regular";
+    const baseSize = firstLineMax ? firstLineMax.size : first.fontSize;
     let align = "left";
     if (node.textAlignHorizontal === "CENTER") align = "center";
     else if (node.textAlignHorizontal === "RIGHT") align = "right";
     else if (node.textAlignHorizontal === "JUSTIFIED") align = "justify-all";
-    let letterSpacingEm = void 0;
-    if (node.letterSpacing !== figma.mixed && node.letterSpacing && fontSizeVal > 0) {
-      if (node.letterSpacing.unit === "PIXELS") {
-        letterSpacingEm = Math.round(node.letterSpacing.value / fontSizeVal * 1e3);
-      }
-    }
-    let lineHeightPt = void 0;
-    if (node.lineHeight !== figma.mixed && node.lineHeight) {
-      if (node.lineHeight.unit === "PIXELS") {
-        lineHeightPt = Math.round(node.lineHeight.value * 10) / 10;
-      }
-    }
-    const styleLower = fontObj.style.toLowerCase();
-    const fauxBold = /bold|700|800|900/.test(styleLower) && !/light|thin/.test(styleLower);
-    const fauxItalic = /italic|oblique/.test(styleLower);
-    const autoResize = "textAutoResize" in node ? node.textAutoResize : "HEIGHT";
-    const shapeType = autoResize === "NONE" ? "box" : "point";
+    const autoResize = node.textAutoResize;
+    const shapeType = autoResize === "WIDTH_AND_HEIGHT" ? "point" : "box";
     const textAlignVertical = node.textAlignVertical === "CENTER" ? "center" : node.textAlignVertical === "BOTTOM" ? "bottom" : "top";
-    const decoration = node.textDecoration !== figma.mixed ? node.textDecoration : "NONE";
-    const underline = decoration === "UNDERLINE";
-    const strikethrough = decoration === "STRIKETHROUGH";
-    const primaryIsCjk = isCjkFont(fontObj.family || "");
-    const primaryFont = {
-      name: toPsdFontName(fontObj.family || "Arial", fontObj.style || "Regular"),
-      script: primaryIsCjk ? 3 : 0,
-      type: primaryIsCjk ? 2 : 0
-    };
-    const styleRuns = buildFontRuns(node.characters || "", primaryIsCjk, primaryFont, pickCjkFallbackFont());
     return {
-      text: node.characters || fallbackName,
-      fontName: primaryFont.name,
-      fontScript: primaryFont.script,
-      fontType: primaryFont.type,
-      // 字号（pt）与 Figma px 数值一致（如 Figma 24px -> 24pt），不乘 scale；
-      // 渲染像素由文档 PPI（=72×scale）控制，保证视觉比例正确。
-      fontSize: Math.round(fontSizeVal * 10) / 10,
-      fontSizeScaled: Math.round(fontSizeVal * scale * 10) / 10,
-      ascentRatio: getTopToBaselineRatio(fontObj.family || "Arial", fontObj.style || "Regular", node.characters || ""),
-      descentRatio: getFontDescentRatio(fontObj.family || "Arial", fontObj.style || "Regular"),
+      text,
+      fontName: first.fontName,
+      fontScript: first.fontScript,
+      fontType: first.fontType,
+      fontSize: first.fontSize,
+      fontSizeScaled: round1(baseSize * scale),
+      ascentRatio: getTopToBaselineRatio(baseFamily, baseStyle, firstLineMax ? firstLineMax.text : text),
+      descentRatio: getFontDescentRatio(baseFamily, baseStyle),
       shapeType,
+      autoHeight: autoResize === "HEIGHT",
+      multiLine: text.indexOf("\n") >= 0,
       textAlignVertical,
-      color,
+      color: first.color,
       align,
-      letterSpacing: letterSpacingEm,
-      lineHeight: lineHeightPt,
-      fauxBold,
-      fauxItalic,
-      underline,
-      strikethrough,
-      styleRuns
+      letterSpacing: first.tracking || void 0,
+      lineHeight: first.leading,
+      // 字体名已解析为真实字重/斜体的 PostScript 名（如 Arial-BoldMT），
+      // 再开仿粗体/仿斜体会在 PS 中二次加粗/倾斜，因此始终关闭
+      fauxBold: false,
+      fauxItalic: false,
+      underline: first.underline,
+      strikethrough: first.strikethrough,
+      fontCaps: first.fontCaps,
+      styleRuns: runs.length > 1 ? runs : void 0
     };
   }
 
-  // src/exporter.ts
+  // src/vector.ts
   var VALID_PSD_BLEND_MODES = {
     "PASS_THROUGH": "pass through",
     "NORMAL": "normal",
@@ -13609,11 +13768,71 @@
     if (!isGroup && mapped === "pass through") return "normal";
     return mapped;
   }
+
+  // src/exporter.ts
   function getNodeBlendMode(node) {
     return "blendMode" in node ? node.blendMode : "NORMAL";
   }
+  function scaleRect(r, scale) {
+    if (!r) return null;
+    const x = Math.round(r.x * scale);
+    const y = Math.round(r.y * scale);
+    return {
+      x,
+      y,
+      width: Math.round((r.x + r.width) * scale) - x,
+      height: Math.round((r.y + r.height) * scale) - y
+    };
+  }
+  async function renderContainerBackground(node, scale) {
+    if (!hasOwnPaint(node)) return null;
+    const src = node;
+    let rect = null;
+    try {
+      rect = figma.createRectangle();
+      rect.resize(Math.max(0.01, src.width), Math.max(0.01, src.height));
+      rect.fills = src.fills;
+      if ("strokes" in src) {
+        rect.strokes = src.strokes;
+        rect.strokeAlign = src.strokeAlign;
+        if (src.strokeWeight !== figma.mixed) {
+          rect.strokeWeight = src.strokeWeight;
+        } else {
+          rect.strokeTopWeight = src.strokeTopWeight;
+          rect.strokeRightWeight = src.strokeRightWeight;
+          rect.strokeBottomWeight = src.strokeBottomWeight;
+          rect.strokeLeftWeight = src.strokeLeftWeight;
+        }
+        if (Array.isArray(src.dashPattern)) rect.dashPattern = src.dashPattern;
+      }
+      if ("cornerRadius" in src) {
+        if (src.cornerRadius !== figma.mixed) {
+          rect.cornerRadius = src.cornerRadius;
+        } else {
+          rect.topLeftRadius = src.topLeftRadius;
+          rect.topRightRadius = src.topRightRadius;
+          rect.bottomLeftRadius = src.bottomLeftRadius;
+          rect.bottomRightRadius = src.bottomRightRadius;
+        }
+        if (typeof src.cornerSmoothing === "number") rect.cornerSmoothing = src.cornerSmoothing;
+      }
+      if ("effects" in src && Array.isArray(src.effects)) rect.effects = src.effects;
+      if ("rotation" in src && src.rotation) rect.rotation = src.rotation;
+      const bytes = await rect.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: scale } });
+      const box = rect.absoluteBoundingBox;
+      const render = rect.absoluteRenderBounds;
+      const offsetX = box && render ? render.x - box.x : 0;
+      const offsetY = box && render ? render.y - box.y : 0;
+      return { bytes, offsetX, offsetY };
+    } catch (err) {
+      console.warn(`\u5BB9\u5668 ${node.name} \u80CC\u666F\u6E32\u67D3\u5931\u8D25:`, err);
+      return null;
+    } finally {
+      if (rect) rect.remove();
+    }
+  }
   async function handleExportPSD(nodeId, scale = 1, exportMode = "hierarchical") {
-    const targetNode = figma.getNodeById(nodeId);
+    const targetNode = await figma.getNodeByIdAsync(nodeId);
     if (!targetNode) {
       figma.ui.postMessage({ type: "error", message: "\u627E\u4E0D\u5230\u6307\u5B9A\u7684\u753B\u677F/\u56FE\u5C42" });
       return;
@@ -13623,10 +13842,13 @@
       figma.ui.postMessage({ type: "error", message: "\u65E0\u6CD5\u83B7\u53D6\u753B\u677F\u5C3A\u5BF8" });
       return;
     }
+    const docWidth = Math.round(rootBounds.width * scale);
+    const docHeight = Math.round(rootBounds.height * scale);
     figma.ui.postMessage({ type: "status", status: "\u5BFC\u51FA\u4E3B\u753B\u677F\u5168\u5C40\u9884\u89C8\u56FE\u50CF\u4E2D..." });
     const rootCompositeBytes = await targetNode.exportAsync({
       format: "PNG",
-      constraint: { type: "SCALE", value: scale }
+      constraint: { type: "SCALE", value: scale },
+      useAbsoluteBounds: true
     });
     const rootCompositeBase64 = uint8ToBase64(rootCompositeBytes);
     const exportLayers = [];
@@ -13643,16 +13865,16 @@
         blendMode: "normal",
         x: 0,
         y: 0,
-        width: Math.round(rootBounds.width * scale),
-        height: Math.round(rootBounds.height * scale),
+        width: docWidth,
+        height: docHeight,
         parentId: null,
         pngBase64: rootCompositeBase64
       });
       figma.ui.postMessage({ type: "status", status: '\u68C0\u6D4B\u5230 "-\u5408\u5E76" \u547D\u540D\uFF0C\u6574\u677F\u6805\u683C\u5316\u5BFC\u51FA\u4E2D...' });
       const payloadRootMerge = {
         artboardName: rootLayerName,
-        width: Math.round(rootBounds.width * scale),
-        height: Math.round(rootBounds.height * scale),
+        width: docWidth,
+        height: docHeight,
         scale,
         rootCompositePngBase64: rootCompositeBase64,
         layers: exportLayers
@@ -13660,24 +13882,10 @@
       figma.ui.postMessage({ type: "export-data", ...payloadRootMerge });
       return;
     }
-    let hasBackground = false;
-    if ("fills" in targetNode && Array.isArray(targetNode.fills) && targetNode.fills.length > 0) {
-      const visibleFills = targetNode.fills.filter((f) => f.visible !== false);
-      if (visibleFills.length > 0) {
-        hasBackground = true;
-      }
-    }
-    if (hasBackground) {
+    if (hasOwnPaint(targetNode)) {
       figma.ui.postMessage({ type: "status", status: "\u6B63\u5728\u5355\u72EC\u6E32\u67D3\u753B\u677F\u80CC\u666F\u56FE\u5C42..." });
-      let tempBgRect = null;
-      try {
-        tempBgRect = figma.createRectangle();
-        tempBgRect.resize(targetNode.width, targetNode.height);
-        tempBgRect.fills = targetNode.fills;
-        const bgPngBytes = await tempBgRect.exportAsync({
-          format: "PNG",
-          constraint: { type: "SCALE", value: scale }
-        });
+      const bg = await renderContainerBackground(targetNode, scale);
+      if (bg) {
         exportLayers.push({
           id: targetNode.id + "_bg",
           name: "\u80CC\u666F",
@@ -13686,19 +13894,13 @@
           visible: true,
           opacity: 1,
           blendMode: "normal",
-          x: 0,
-          y: 0,
-          width: Math.round(rootBounds.width * scale),
-          height: Math.round(rootBounds.height * scale),
+          x: Math.round(bg.offsetX * scale),
+          y: Math.round(bg.offsetY * scale),
+          width: docWidth,
+          height: docHeight,
           parentId: null,
-          pngBase64: uint8ToBase64(bgPngBytes)
+          pngBase64: uint8ToBase64(bg.bytes)
         });
-      } catch (err) {
-        console.warn("\u7EAF\u80CC\u666F\u6E32\u67D3\u5931\u8D25:", err);
-      } finally {
-        if (tempBgRect) {
-          tempBgRect.remove();
-        }
       }
     }
     const nodeList = [];
@@ -13716,21 +13918,53 @@
         total,
         layerName: item.name
       });
+      const common = {
+        id: item.id,
+        name: item.name,
+        visible: item.visible,
+        opacity: item.opacity !== void 0 ? item.opacity : 1,
+        width: Math.round(item.width * scale),
+        height: Math.round(item.height * scale),
+        parentId: item.parentId,
+        clip: scaleRect(item.clip, scale)
+      };
       if (item.isGroup) {
-        exportLayers.push({
-          id: item.id,
-          name: item.name,
+        const groupLayer = {
+          ...common,
           kind: "group",
           isGroup: true,
-          visible: item.visible,
-          opacity: item.opacity !== void 0 ? item.opacity : 1,
-          blendMode: convertBlendMode(getNodeBlendMode(item.node), true),
+          blendMode: item.maskNode ? "pass through" : convertBlendMode(getNodeBlendMode(item.node), true),
           x: Math.round(item.x * scale),
-          y: Math.round(item.y * scale),
-          width: Math.round(item.width * scale),
-          height: Math.round(item.height * scale),
-          parentId: item.parentId
-        });
+          y: Math.round(item.y * scale)
+        };
+        if (item.maskNode) {
+          try {
+            const maskBytes = await item.maskNode.exportAsync({
+              format: "PNG",
+              constraint: { type: "SCALE", value: scale }
+            });
+            groupLayer.maskPngBase64 = uint8ToBase64(maskBytes);
+            groupLayer.maskX = Math.round(item.renderX * scale);
+            groupLayer.maskY = Math.round(item.renderY * scale);
+            groupLayer.maskLuminance = "maskType" in item.maskNode && item.maskNode.maskType === "LUMINANCE";
+          } catch (err) {
+            console.warn(`\u8499\u7248 ${item.name} \u5BFC\u51FA\u5931\u8D25:`, err);
+          }
+        }
+        exportLayers.push(groupLayer);
+      } else if (item.isBackground) {
+        const bg = await renderContainerBackground(item.node, scale);
+        if (bg) {
+          exportLayers.push({
+            ...common,
+            kind: "image",
+            isGroup: false,
+            blendMode: "normal",
+            x: Math.round((item.x + bg.offsetX) * scale),
+            y: Math.round((item.y + bg.offsetY) * scale),
+            pngBase64: uint8ToBase64(bg.bytes)
+          });
+        }
       } else if (item.kind === "text") {
         let textData = null;
         try {
@@ -13742,26 +13976,21 @@
         try {
           const pngBytes = await item.node.exportAsync({
             format: "PNG",
-            constraint: { type: "SCALE", value: scale }
+            constraint: { type: "SCALE", value: scale },
+            useAbsoluteBounds: true
           });
           textPngBase64 = uint8ToBase64(pngBytes);
         } catch (pngErr) {
           console.warn(`\u6587\u672C\u56FE\u5C42 ${item.name} PNG \u5BFC\u51FA\u5931\u8D25\uFF08\u4ECD\u4FDD\u7559\u53EF\u7F16\u8F91\u6587\u672C\uFF09:`, pngErr);
         }
         exportLayers.push({
-          id: item.id,
-          name: item.name,
+          ...common,
           kind: "text",
           isGroup: false,
           textData,
-          visible: item.visible,
-          opacity: item.opacity !== void 0 ? item.opacity : 1,
           blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
           x: Math.round(item.x * scale),
           y: Math.round(item.y * scale),
-          width: Math.round(item.width * scale),
-          height: Math.round(item.height * scale),
-          parentId: item.parentId,
           pngBase64: textPngBase64
         });
       } else {
@@ -13771,18 +14000,12 @@
             constraint: { type: "SCALE", value: scale }
           });
           exportLayers.push({
-            id: item.id,
-            name: item.name,
+            ...common,
             kind: item.kind,
             isGroup: false,
-            visible: item.visible,
-            opacity: item.opacity !== void 0 ? item.opacity : 1,
             blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
-            x: Math.round(item.x * scale),
-            y: Math.round(item.y * scale),
-            width: Math.round(item.width * scale),
-            height: Math.round(item.height * scale),
-            parentId: item.parentId,
+            x: Math.round(item.renderX * scale),
+            y: Math.round(item.renderY * scale),
             pngBase64: uint8ToBase64(pngBytes)
           });
         } catch (err) {
@@ -13792,8 +14015,8 @@
     }
     const payload = {
       artboardName: targetNode.name,
-      width: Math.round(rootBounds.width * scale),
-      height: Math.round(rootBounds.height * scale),
+      width: docWidth,
+      height: docHeight,
       scale,
       rootCompositePngBase64: rootCompositeBase64,
       layers: exportLayers

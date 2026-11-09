@@ -4,9 +4,10 @@
   "description": "Figma to PSD Pro Exporter Plugin",
   "main": "code.js",
   "scripts": {
-    "build": "esbuild src/code.ts --bundle --outfile=code.js --target=es2020",
+    "build": "esbuild src/code.ts --bundle --outfile=code.js --target=es2020 && node -e \"require('fs').copyFileSync('src/ui.html','ui.html')\"",
     "watch": "esbuild src/code.ts --bundle --outfile=code.js --target=es2020 --watch",
-    "build:fonts": "powershell -ExecutionPolicy Bypass -File test-env/dump-fonts.ps1 && node test-env/extract-font-names.js && node test-env/generate-font-map.js"
+    "build:fonts": "powershell -ExecutionPolicy Bypass -File test-env/dump-fonts.ps1 && node test-env/extract-font-names.js && node test-env/generate-font-map.js",
+    "typecheck": "tsc --noEmit -p ."
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.80.0",

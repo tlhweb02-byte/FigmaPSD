@@ -1,8 +1,22 @@
 /**
  * Layers 图层列表收集模块
+ *
+ * 坐标约定（均为相对根画板左上角、未乘导出倍率的 Figma 单位）：
+ *   - x/y/width/height：节点 absoluteBoundingBox（布局框）
+ *   - renderX/renderY ：节点 absoluteRenderBounds（实际渲染范围，含描边外扩/阴影等效果）。
+ *     exportAsync 默认按渲染范围裁切 PNG，因此位图图层必须按 renderX/renderY 定位，
+ *     否则带阴影/外描边的图层会整体错位。
  */
 
 export type LayerKind = 'group' | 'text' | 'vector' | 'image';
+
+/** 相对根画板的矩形（Figma 单位，未乘倍率） */
+export interface RelRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface ParsedNodeItem {
   id: string;
@@ -15,8 +29,16 @@ export interface ParsedNodeItem {
   y: number;
   width: number;
   height: number;
+  renderX: number;
+  renderY: number;
   parentId: string | null;
   node: SceneNode;
+  /** 需要在 PSD 中用图层蒙版裁切到的矩形（来自 clipsContent 的祖先画板） */
+  clip?: RelRect | null;
+  /** 该条目是容器自身的背景（填充/描边/圆角/效果），需离屏单独渲染 */
+  isBackground?: boolean;
+  /** 该条目是 Figma 蒙版（isMask）生成的组，maskNode 的像素作为组蒙版 */
+  maskNode?: SceneNode;
 }
 
 /** 根据 Figma 节点类型推断 PSD 图层类型 */
@@ -50,79 +72,200 @@ function isContainerType(node: SceneNode): boolean {
   );
 }
 
+/** 容器自身是否有可见的填充或描边（展开为组时需要单独输出背景图层） */
+export function hasOwnPaint(node: SceneNode): boolean {
+  if (node.type === 'GROUP') return false;
+  const visiblePaint = (paints: unknown): boolean =>
+    Array.isArray(paints) && paints.some((p: Paint) => p.visible !== false && (p.opacity === undefined || p.opacity > 0));
+  const fills = 'fills' in node ? (node as GeometryMixin).fills : undefined;
+  const strokes = 'strokes' in node ? (node as GeometryMixin).strokes : undefined;
+  return visiblePaint(fills) || visiblePaint(strokes);
+}
+
+function intersectRect(a: RelRect | null, b: RelRect | null): RelRect | null {
+  if (!a) return b;
+  if (!b) return a;
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const r = Math.min(a.x + a.width, b.x + b.width);
+  const btm = Math.min(a.y + a.height, b.y + b.height);
+  return { x, y, width: Math.max(0, r - x), height: Math.max(0, btm - y) };
+}
+
+function toRel(rect: Rect, rootBounds: Rect): RelRect {
+  return { x: rect.x - rootBounds.x, y: rect.y - rootBounds.y, width: rect.width, height: rect.height };
+}
+
+function getOpacity(node: SceneNode): number {
+  return 'opacity' in node && typeof (node as any).opacity === 'number' ? (node as any).opacity : 1;
+}
+
+/**
+ * 递归收集图层。结果数组顺序 = 由下到上（与 Figma children 及 ag-psd children 顺序一致）。
+ *
+ * @param clip 祖先 clipsContent 画板留下、尚未被已输出的组蒙版处理的裁切矩形
+ */
 export function collectNodes(
   node: SceneNode,
   rootNode: SceneNode,
   rootBounds: Rect,
   result: ParsedNodeItem[],
   exportMode: string,
-  parentId: string | null = null
+  parentId: string | null = null,
+  clip: RelRect | null = null
 ): void {
-  if (!node.visible && node !== rootNode) return;
-
-  const isRoot = node === rootNode;
-
-  if (!isRoot) {
-    const bounds = node.absoluteBoundingBox;
-    if (!bounds || bounds.width === 0 || bounds.height === 0) return;
-
-    const relX = bounds.x - rootBounds.x;
-    const relY = bounds.y - rootBounds.y;
-
-    // 合并栅格化：容器命名以 "-合并" 结尾时，不再展开为组，
-    // 整组作为一张位图（kind 走 inferKind 默认 image），图层名去掉后缀
-    const wantsMerge = isContainerType(node) &&
-      typeof node.name === 'string' && node.name.endsWith(MERGE_SUFFIX);
-    const layerName = wantsMerge ? node.name.slice(0, -MERGE_SUFFIX.length) : node.name;
-
-    const isContainer = isContainerType(node) && !wantsMerge && exportMode === 'hierarchical';
-
-    const opacity = 'opacity' in node && typeof (node as any).opacity === 'number'
-      ? (node as any).opacity
-      : 1;
-
-    if (isContainer && 'children' in node && (node as FrameNode).children.length > 0) {
-      result.push({
-        id: node.id,
-        name: layerName,
-        kind: 'group',
-        isGroup: true,
-        visible: node.visible,
-        opacity: opacity,
-        x: relX,
-        y: relY,
-        width: bounds.width,
-        height: bounds.height,
-        parentId: parentId,
-        node: node
-      });
-
-      for (const child of (node as FrameNode).children) {
-        collectNodes(child, rootNode, rootBounds, result, exportMode, node.id);
-      }
-      return;
-    } else {
-      result.push({
-        id: node.id,
-        name: layerName,
-        kind: inferKind(node),
-        isGroup: false,
-        visible: node.visible,
-        opacity: opacity,
-        x: relX,
-        y: relY,
-        width: bounds.width,
-        height: bounds.height,
-        parentId: parentId,
-        node: node
-      });
-      return;
+  if (node === rootNode) {
+    if ('children' in node) {
+      // 根画板本身就是 PSD 文档边界，clipsContent 由文档尺寸天然实现
+      collectChildren((node as ChildrenMixin).children, rootNode, rootBounds, result, exportMode, null, null);
     }
+    return;
   }
 
-  if ('children' in node) {
-    for (const child of (node as FrameNode).children) {
-      collectNodes(child, rootNode, rootBounds, result, exportMode, null);
+  if (!node.visible) return;
+
+  const bounds = node.absoluteBoundingBox;
+  // 渲染范围为 null 表示节点没有任何可见像素（空文本、全透明等）。
+  // 注意：不能用 bounds 宽/高为 0 来判断——水平/垂直线条的布局框高或宽就是 0，但有描边像素。
+  const renderBounds = 'absoluteRenderBounds' in node ? (node as any).absoluteRenderBounds as Rect | null : bounds;
+  if (!bounds || !renderBounds || renderBounds.width <= 0 || renderBounds.height <= 0) return;
+
+  const rel = toRel(bounds, rootBounds);
+  const relRender = toRel(renderBounds, rootBounds);
+
+  // 完全落在裁切区域之外的图层在 Figma 中不可见，直接跳过
+  if (clip) {
+    const vis = intersectRect(clip, relRender);
+    if (!vis || vis.width <= 0 || vis.height <= 0) return;
+  }
+
+  // 合并栅格化：容器命名以 "-合并" 结尾时，不再展开为组，
+  // 整组作为一张位图（kind 走 inferKind 默认 image），图层名去掉后缀
+  const wantsMerge = isContainerType(node) &&
+    typeof node.name === 'string' && node.name.endsWith(MERGE_SUFFIX);
+  const layerName = wantsMerge ? node.name.slice(0, -MERGE_SUFFIX.length) : node.name;
+
+  const expand = isContainerType(node) && !wantsMerge && 'children' in node;
+  const base = {
+    visible: node.visible,
+    x: rel.x,
+    y: rel.y,
+    width: bounds.width,
+    height: bounds.height,
+    renderX: relRender.x,
+    renderY: relRender.y,
+    node: node
+  };
+
+  if (!expand) {
+    result.push({
+      ...base,
+      id: node.id,
+      name: layerName,
+      kind: inferKind(node),
+      isGroup: false,
+      opacity: getOpacity(node),
+      parentId: parentId,
+      clip: clip
+    });
+    return;
+  }
+
+  const ownClip: RelRect | null =
+    'clipsContent' in node && (node as FrameNode).clipsContent ? rel : null;
+  const hierarchical = exportMode === 'hierarchical';
+
+  let childParent = parentId;
+  let childClip: RelRect | null;
+
+  if (hierarchical) {
+    // 容器 -> PSD 组（文件夹）。组蒙版负责祖先裁切 + 自身 clipsContent 裁切。
+    result.push({
+      ...base,
+      id: node.id,
+      name: layerName,
+      kind: 'group',
+      isGroup: true,
+      opacity: getOpacity(node),
+      parentId: parentId,
+      clip: intersectRect(clip, ownClip)
+    });
+    childParent = node.id;
+    childClip = null;
+  } else {
+    // 平铺模式：不输出组，裁切矩形下传给每个子图层
+    childClip = intersectRect(clip, ownClip);
+  }
+
+  // 容器自身的背景（填充/描边/圆角/阴影）。展开为组后这些属性没有对应的 PSD 图层，
+  // 必须单独渲染一张背景位图，否则卡片/按钮等的底色全部丢失。
+  if (hasOwnPaint(node)) {
+    result.push({
+      ...base,
+      id: node.id + '_bg',
+      name: layerName + ' 背景',
+      kind: 'image',
+      isGroup: false,
+      // 平铺模式下容器的不透明度无法落到组上，叠加到背景图层
+      opacity: hierarchical ? 1 : getOpacity(node),
+      parentId: childParent,
+      // 背景不受自身 clipsContent 裁切（外阴影/外描边要保留），只受祖先裁切
+      clip: hierarchical ? null : clip,
+      isBackground: true
+    });
+  }
+
+  collectChildren((node as ChildrenMixin).children, rootNode, rootBounds, result, exportMode, childParent, childClip);
+}
+
+/**
+ * 遍历同级子节点，处理 Figma 蒙版：isMask 节点会裁切它上方的所有兄弟节点，
+ * 直到遇到下一个蒙版节点或父容器结束。PSD 中生成一个以蒙版节点像素为组蒙版的组。
+ */
+function collectChildren(
+  children: readonly SceneNode[],
+  rootNode: SceneNode,
+  rootBounds: Rect,
+  result: ParsedNodeItem[],
+  exportMode: string,
+  parentId: string | null,
+  clip: RelRect | null
+): void {
+  let currentParent = parentId;
+  let currentClip = clip;
+
+  for (const child of children) {
+    if ('isMask' in child && (child as BlendMixin).isMask) {
+      if (!child.visible) continue;
+      const bounds = child.absoluteBoundingBox;
+      const renderBounds = (child as any).absoluteRenderBounds as Rect | null;
+      if (!bounds || !renderBounds) continue;
+      const rel = toRel(bounds, rootBounds);
+      const relRender = toRel(renderBounds, rootBounds);
+      const groupId = child.id + '_maskgroup';
+      result.push({
+        id: groupId,
+        name: child.name + ' (蒙版)',
+        kind: 'group',
+        isGroup: true,
+        visible: true,
+        opacity: 1,
+        x: rel.x,
+        y: rel.y,
+        width: bounds.width,
+        height: bounds.height,
+        renderX: relRender.x,
+        renderY: relRender.y,
+        parentId: parentId,
+        node: child,
+        clip: clip,
+        maskNode: child
+      });
+      // 蒙版组已承担了外层裁切，组内图层不再重复裁切
+      currentParent = groupId;
+      currentClip = null;
+      continue;
     }
+    collectNodes(child, rootNode, rootBounds, result, exportMode, currentParent, currentClip);
   }
 }
