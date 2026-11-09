@@ -13776,6 +13776,10 @@
   function getNodeBlendMode(node) {
     return "blendMode" in node ? node.blendMode : "NORMAL";
   }
+  function preciseRect(x, y, width, height, scale) {
+    const r = (v) => Math.round(v * scale * 100) / 100;
+    return { x: r(x), y: r(y), width: r(width), height: r(height) };
+  }
   function scaleRect(r, scale) {
     if (!r) return null;
     const x = Math.round(r.x * scale);
@@ -14041,6 +14045,11 @@
           y: Math.round(item.y * scale),
           renderX: Math.round(item.renderX * scale),
           renderY: Math.round(item.renderY * scale),
+          textBox: preciseRect(item.x, item.y, item.width, item.height, scale),
+          glyphBox: (() => {
+            const rb = item.node.absoluteRenderBounds;
+            return rb ? preciseRect(rb.x - rootBounds.x, rb.y - rootBounds.y, rb.width, rb.height, scale) : void 0;
+          })(),
           pngBase64: textPngBase64
         });
       } else {

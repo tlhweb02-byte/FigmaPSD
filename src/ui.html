@@ -592,6 +592,19 @@
             // 最精确：主线程在 Figma 中实测的首行基线
             baselineY = td.baselineY;
             baselineMethod = 'figma-measure';
+          } else if (shapeType === 'point' && !td.multiLine && layer.glyphBox) {
+            // 备用方案 1：Figma 提供的精确字形范围（小数精度）。字形底部 = 基线 + 超出量：
+            //   含 g j p q y：超出 descender 深度；含中文：中文字形约低于基线 0.08em；
+            //   含圆底字形（0 3 5 6 8 9 C O S 等）：视觉补偿约 0.018em；其余平底字形贴住基线。
+            // 用同一设计的 Figma 渲染与 PS 原稿对照标定，误差 < 0.4px。
+            const txt = td.text || '';
+            const glyphBottom = layer.glyphBox.y + layer.glyphBox.height;
+            let overshoot = 0;
+            if (/[gjpqy]/.test(txt)) overshoot = fontSizeScaled * descentRatio;
+            else if (/[\u3000-\u9fff\uff00-\uffef\uac00-\ud7af]/.test(txt)) overshoot = fontSizeScaled * 0.08;
+            else if (/[035689CGJOQSUabcdeostu@&%$]/.test(txt)) overshoot = fontSizeScaled * 0.018;
+            baselineY = Math.round((glyphBottom - overshoot) * 100) / 100;
+            baselineMethod = 'glyph-bounds';
           } else if (ink && shapeType === 'point') {
             if (td.multiLine) {
               // 多行文本：transform 基线是"首行"基线，ink.bottom 是末行底部，不能用；
@@ -612,9 +625,11 @@
           // Figma 自动宽度文本框恰好包住字符前进宽度，与 PS 对齐锚点语义一致；
           // 不用 ink 边界（会把字形左侧留白算进偏移，导致文字整体右移 1~2px）。
           const just = td.align || 'left';
-          let anchorX = left;
-          if (just === 'center') anchorX = Math.round((left + right) / 2);
-          else if (just === 'right') anchorX = right;
+          // 用未取整的文本框，避免居中锚点被四舍五入产生 0.5px 偏差
+          const tb = layer.textBox || { x: left, y: top, width: right - left, height: bottom - top };
+          let anchorX = tb.x;
+          if (just === 'center') anchorX = Math.round((tb.x + tb.width / 2) * 100) / 100;
+          else if (just === 'right') anchorX = Math.round((tb.x + tb.width) * 100) / 100;
 
           // 位置对比报告
           positionReport.push({

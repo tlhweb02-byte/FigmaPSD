@@ -13,6 +13,12 @@ function getNodeBlendMode(node: SceneNode): string {
   return 'blendMode' in node ? (node as BlendMixin).blendMode : 'NORMAL';
 }
 
+/** 保留两位小数的文档像素矩形（不取整，用于文字精确定位） */
+function preciseRect(x: number, y: number, width: number, height: number, scale: number): PixelRect {
+  const r = (v: number) => Math.round(v * scale * 100) / 100;
+  return { x: r(x), y: r(y), width: r(width), height: r(height) };
+}
+
 function scaleRect(r: RelRect | null | undefined, scale: number): PixelRect | null {
   if (!r) return null;
   const x = Math.round(r.x * scale);
@@ -341,6 +347,11 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
         y: Math.round(item.y * scale),
         renderX: Math.round(item.renderX * scale),
         renderY: Math.round(item.renderY * scale),
+        textBox: preciseRect(item.x, item.y, item.width, item.height, scale),
+        glyphBox: (() => {
+          const rb = (item.node as TextNode).absoluteRenderBounds;
+          return rb ? preciseRect(rb.x - rootBounds.x, rb.y - rootBounds.y, rb.width, rb.height, scale) : undefined;
+        })(),
         pngBase64: textPngBase64
       });
     } else {

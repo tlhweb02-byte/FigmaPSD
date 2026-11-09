@@ -40,6 +40,10 @@ export interface ExportLayerPayload {
   /** 文本图层：字形实际渲染范围左上角（文档像素），用于校验/修正预览 PNG 的坐标原点 */
   renderX?: number;
   renderY?: number;
+  /** 文本图层：未取整的文本框（文档像素），用于精确的对齐锚点和段落文本框 */
+  textBox?: PixelRect;
+  /** 文本图层：未取整的字形渲染范围（文档像素），基线测量失败时的精确备用依据 */
+  glyphBox?: PixelRect;
 }
 
 export interface ExportDataPayload {
