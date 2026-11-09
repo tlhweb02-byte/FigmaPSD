@@ -110,6 +110,13 @@ Figma2PSD-Pro
 
 回归测试：`node test-env/validate-real-figma-baseline.js`（测试数据在 `test-env/fixtures/figma-12170-4501/`）。
 
+## 组件插槽（Slot）
+
+组件实例中的插槽（Figma 节点类型 `SLOT`）现在会展开为 PSD 组，插槽内的文字保持为可编辑文字图层。
+旧版只把 FRAME / GROUP / COMPONENT / INSTANCE / SECTION 当作容器，插槽被整体导出成一张图片。
+现在的规则是：凡是有子节点的节点都按容器展开（布尔运算组除外，仍整体导出为一个形状），
+以后 Figma 新增的容器类型也不会再被误转成图片。若希望某个插槽/容器拍平为图片，仍可在命名末尾加「-合并」。
+
 ## 批量导出多个画板
 
 在 Figma 中同时选中多个画板（Frame / Component / Group 等）后打开插件，列表中会列出全部画板（默认全选，

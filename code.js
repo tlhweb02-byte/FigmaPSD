@@ -18,7 +18,8 @@
   }
   var MERGE_SUFFIX = "-\u5408\u5E76";
   function isContainerType(node) {
-    return node.type === "FRAME" || node.type === "GROUP" || node.type === "COMPONENT" || node.type === "INSTANCE" || node.type === "SECTION";
+    if (node.type === "BOOLEAN_OPERATION") return false;
+    return "children" in node && Array.isArray(node.children);
   }
   function hasOwnPaint(node) {
     if (node.type === "GROUP") return false;

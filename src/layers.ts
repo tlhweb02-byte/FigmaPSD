@@ -61,15 +61,15 @@ export function inferKind(node: SceneNode): LayerKind {
 /** 合并栅格化标记：容器命名以该后缀结尾时，导出时整组拍平为一张位图 */
 export const MERGE_SUFFIX = '-合并';
 
-/** 判断节点类型是否为容器（组/组件实例/画板） */
+/**
+ * 判断节点是否为容器（展开为 PSD 组，子图层各自导出）。
+ * 规则：凡是有子节点的都算容器——FRAME / GROUP / COMPONENT / INSTANCE / SECTION，
+ * 以及组件插槽 SLOT 等新类型（旧版只列举固定类型，插槽被当成一张图片导出，里面的文字变成位图）。
+ * 例外：布尔运算组（BOOLEAN_OPERATION）的子路径只是参与运算的形状，必须整体作为一个形状导出。
+ */
 function isContainerType(node: SceneNode): boolean {
-  return (
-    node.type === 'FRAME' ||
-    node.type === 'GROUP' ||
-    node.type === 'COMPONENT' ||
-    node.type === 'INSTANCE' ||
-    node.type === 'SECTION'
-  );
+  if (node.type === 'BOOLEAN_OPERATION') return false;
+  return 'children' in node && Array.isArray((node as ChildrenMixin).children);
 }
 
 /** 容器自身是否有可见的填充或描边（展开为组时需要单独输出背景图层） */
