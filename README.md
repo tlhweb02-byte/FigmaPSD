@@ -110,6 +110,22 @@ Figma2PSD-Pro
 
 回归测试：`node test-env/validate-real-figma-baseline.js`（测试数据在 `test-env/fixtures/figma-12170-4501/`）。
 
+## 关于 Photoshop「更新文字图层」提示
+
+用 ag-psd 写入的文字图层缺少 Photoshop 内部的排版缓存（ag-psd 文档明确说明无法生成），
+所以 PS 打开或编辑时一定会提示更新文字图层，这个提示无法去掉。更新后 PS 会按 PSD 里写入的
+「文字原点（锚点 x, 首行基线 y）+ 字体 + 字号」重新排版——这正是本插件精确计算的部分，
+因此更新后的位置应与 Figma 一致。为了更接近 PS 原生文件，点文本还会写入：
+
+- `bounds`（排版框）与 `boundingBox`（字形框），均相对文字原点；
+- 递增的 `TextIndex`（原先所有图层都是 0）。
+
+用主图画板验证：写入的 boundingBox 与 PS 原稿中同一段文字由 PS 自己排版得出的值相差 < 0.1px。
+
+如果更新后仍有偏移，常见原因是 **PS 所在电脑没安装该字体**（PS 用替代字体排版，度量不同），
+更新时 PS 会提示缺失字体。也可在 Figma 插件控制台查看「文字位置对比报告」中每层的定位方法：
+`figma-measure`（实测，最准）/ `glyph-bounds`（备用，误差 < 0.4px）。
+
 ## 安装与开发说明
 
 1. 在 Figma 桌面端点击左上角菜单 -> **Plugins** -> **Development** -> **Import plugin from manifest...**。

@@ -514,6 +514,7 @@
       const layerMap = new Map();
       const rootChildren = [];
       const positionReport = []; // 文字图层位置对比报告
+      let textIndex = 0; // TySh TextIndex：PS 原生文件中每个文字图层依次编号，不能全部为 0
 
       for (const layer of layers) {
         if (layer.isGroup) {
@@ -686,7 +687,7 @@
             antiAlias: 'sharp',
             gridding: 'none',
             orientation: 'horizontal',
-            index: 0,
+            index: textIndex++,
             style: buildTextStyle(defaultRun),
             paragraphStyle: {
               // point 文本不支持两端对齐，退回左对齐
@@ -723,6 +724,15 @@
             }
           } else {
             textObj.pointBase = [0, 0];
+            // 与 PS 原生文件一致，写入相对文字原点（锚点, 基线）的排版框 bounds 与字形框 boundingBox。
+            // PS 原生点文本都带这两项；缺失时 PS 只能完全依赖重排结果。
+            const px = v => ({ value: Math.round(v * 1000) / 1000, units: 'Pixels' });
+            const rel = r => ({
+              left: px(r.x - anchorX), top: px(r.y - baselineY),
+              right: px(r.x + r.width - anchorX), bottom: px(r.y + r.height - baselineY)
+            });
+            textObj.bounds = rel(tb);
+            if (layer.glyphBox) textObj.boundingBox = rel(layer.glyphBox);
           }
 
           // 多样式 run：混合字体/字号/颜色/字距/装饰，以及拉丁字体中的 ￥/中文 回退到 CJK 字体
