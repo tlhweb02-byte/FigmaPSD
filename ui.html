@@ -497,10 +497,19 @@
       const { artboardName, rootCompositePngBase64, layers, scale } = data;
       const exportScale = (typeof scale === 'number' && scale > 0) ? scale : 1;
 
-      const { canvas: rootCanvas } = await base64ToCanvasOnly(rootCompositePngBase64, 'RootComposite');
-      // 文档尺寸以主线程计算的画板尺寸为准（合成图按画板布局框导出，二者一致）
-      const docWidth = data.width || rootCanvas.width;
-      const docHeight = data.height || rootCanvas.height;
+      const { canvas: compositeCanvas } = await base64ToCanvasOnly(rootCompositePngBase64, 'RootComposite');
+      // 文档尺寸以主线程计算的画板尺寸为准（合成图按画板布局框导出）。
+      // Figma 导出的像素尺寸可能因小数取整与之相差 1px，而 ag-psd 要求合成图与文档等大，
+      // 尺寸不一致时重绘到文档尺寸的画布上，避免整个导出失败。
+      const docWidth = data.width || compositeCanvas.width;
+      const docHeight = data.height || compositeCanvas.height;
+      let rootCanvas = compositeCanvas;
+      if (compositeCanvas.width !== docWidth || compositeCanvas.height !== docHeight) {
+        rootCanvas = document.createElement('canvas');
+        rootCanvas.width = docWidth;
+        rootCanvas.height = docHeight;
+        rootCanvas.getContext('2d').drawImage(compositeCanvas, 0, 0);
+      }
 
       const layerMap = new Map();
       const rootChildren = [];
@@ -567,20 +576,30 @@
           }
           const ink = textCanvas ? detectTextInk(textCanvas) : null;
 
+          // PNG 坐标原点：正常情况下文本 PNG 按文本框导出（原点 = 框左上角）。
+          // 若 PNG 尺寸与文本框不符，说明它被裁到了字形范围（Figma 默认导出行为），
+          // 原点是字形渲染范围左上角。此时仍按框顶换算，大字号文本会整体上移
+          // "框顶到字形顶部"的距离（行高越大、字号越大偏得越多）。
+          const pngMatchesBox = !!textCanvas &&
+            Math.abs(textCanvas.width - (right - left)) <= 2 &&
+            Math.abs(textCanvas.height - (bottom - top)) <= 2;
+          const pngLeft = (!pngMatchesBox && textCanvas && typeof layer.renderX === 'number') ? layer.renderX : left;
+          const pngTop = (!pngMatchesBox && textCanvas && typeof layer.renderY === 'number') ? layer.renderY : top;
+
           let baselineY = estimatedBaselineY;
           let baselineMethod = 'font-metrics';
           if (ink && shapeType === 'point') {
             if (td.multiLine) {
               // 多行文本：transform 基线是"首行"基线，ink.bottom 是末行底部，不能用；
               // 改为 首行视觉顶部(ink.top) + 视觉顶部到基线的距离
-              baselineY = top + ink.top + Math.round(fontSizeScaled * ascentRatio);
+              baselineY = pngTop + ink.top + Math.round(fontSizeScaled * ascentRatio);
               baselineMethod = 'ink-top';
             } else {
               // ink bottom 即文字实际底部：无 descender 文本（数字/大写）≈ 基线；
               // 含 descender 文本（g j p q y）的 ink bottom = 基线 + descender 深度。
               const hasDescender = /[gjpqy]/.test(td.text || '');
               const descenderPx = Math.round(fontSizeScaled * descentRatio);
-              baselineY = hasDescender ? (top + ink.bottom - descenderPx) : (top + ink.bottom);
+              baselineY = hasDescender ? (pngTop + ink.bottom - descenderPx) : (pngTop + ink.bottom);
               baselineMethod = 'ink-detect';
             }
           }
@@ -709,8 +728,10 @@
           // 文本图层同时附带栅格预览像素（Photoshop 文本图层本身既含像素也含 TySh）
           if (textCanvas) {
             textLayerObj.canvas = textCanvas;
-            textLayerObj.right = left + textCanvas.width;
-            textLayerObj.bottom = top + textCanvas.height;
+            textLayerObj.left = pngLeft;
+            textLayerObj.top = pngTop;
+            textLayerObj.right = pngLeft + textCanvas.width;
+            textLayerObj.bottom = pngTop + textCanvas.height;
           } else {
             // 文本像素缺失时仍提供正确尺寸的透明画布，保证图层记录边界有效
             const emptyCanvas = document.createElement('canvas');
@@ -720,7 +741,8 @@
           }
 
           const m = buildLayerMask(layer.clip || null, null, {
-            x: left, y: top, width: textLayerObj.right - left, height: textLayerObj.bottom - top
+            x: textLayerObj.left, y: textLayerObj.top,
+            width: textLayerObj.right - textLayerObj.left, height: textLayerObj.bottom - textLayerObj.top
           });
           if (m.empty) continue;
           if (m.mask) textLayerObj.mask = m.mask;

@@ -281,6 +281,8 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
         blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
         x: Math.round(item.x * scale),
         y: Math.round(item.y * scale),
+        renderX: Math.round(item.renderX * scale),
+        renderY: Math.round(item.renderY * scale),
         pngBase64: textPngBase64
       });
     } else {

@@ -37,6 +37,9 @@ export interface ExportLayerPayload {
   maskY?: number;
   /** 亮度蒙版（Figma LUMINANCE），否则按 alpha */
   maskLuminance?: boolean;
+  /** 文本图层：字形实际渲染范围左上角（文档像素），用于校验/修正预览 PNG 的坐标原点 */
+  renderX?: number;
+  renderY?: number;
 }
 
 export interface ExportDataPayload {
