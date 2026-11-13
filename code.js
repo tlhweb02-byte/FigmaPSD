@@ -19,7 +19,42 @@
   var MERGE_SUFFIX = "-\u5408\u5E76";
   function isContainerType(node) {
     if (node.type === "BOOLEAN_OPERATION") return false;
-    return "children" in node && Array.isArray(node.children);
+    if (!("children" in node)) return false;
+    const children = node.children;
+    return children != null && typeof children.length === "number";
+  }
+  function describeTree(node, depth = 0, lines = []) {
+    const read = (fn) => {
+      try {
+        return String(fn());
+      } catch (e) {
+        return "<<\u9519\u8BEF: " + (e && e.message ? e.message : e) + ">>";
+      }
+    };
+    const n = node;
+    let kids = null;
+    let kidsInfo = "\u65E0children\u5C5E\u6027";
+    try {
+      if ("children" in n) {
+        kids = n.children;
+        kidsInfo = `children: isArray=${Array.isArray(kids)} length=${kids == null ? "null" : kids.length}`;
+      }
+    } catch (e) {
+      kidsInfo = "<<\u8BFB\u53D6children\u51FA\u9519: " + (e && e.message ? e.message : e) + ">>";
+    }
+    lines.push(
+      "  ".repeat(depth) + `${read(() => n.type)} "${read(() => n.name)}" id=${read(() => n.id)} visible=${read(() => n.visible)} removed=${read(() => n.removed)} isMask=${read(() => n.isMask)} box=${read(() => JSON.stringify(n.absoluteBoundingBox))} render=${read(() => JSON.stringify(n.absoluteRenderBounds))} ${kidsInfo}`
+    );
+    if (kids && typeof kids.length === "number" && depth < 12) {
+      for (let i = 0; i < kids.length; i++) {
+        try {
+          describeTree(kids[i], depth + 1, lines);
+        } catch (e) {
+          lines.push("  ".repeat(depth + 1) + `<<\u7B2C ${i} \u4E2A\u5B50\u8282\u70B9\u65E0\u6CD5\u8BFB\u53D6: ${e && e.message ? e.message : e}>>`);
+        }
+      }
+    }
+    return lines;
   }
   function hasOwnPaint(node) {
     if (node.type === "GROUP") return false;
@@ -13973,6 +14008,18 @@
     collectNodes(targetNode, targetNode, rootBounds, nodeList, exportMode, null);
     const total = nodeList.length;
     const skipped = [];
+    try {
+      const diag = [
+        `# \u753B\u677F\u300C${targetNode.name}\u300D id=${targetNode.id} \u500D\u7387=${scale} \u6A21\u5F0F=${exportMode}`,
+        "## \u63D2\u4EF6\u8BFB\u5230\u7684\u8282\u70B9\u6811",
+        ...describeTree(targetNode),
+        "## \u6574\u7406\u540E\u7684\u56FE\u5C42\u5217\u8868",
+        ...nodeList.map((it) => `${it.isGroup ? "[\u7EC4]" : it.isBackground ? "[\u80CC\u666F]" : it.kind === "text" ? "[\u6587\u5B57]" : "[\u56FE\u7247]"} "${it.name}" id=${it.id} parent=${it.parentId}`)
+      ].join("\n");
+      figma.ui.postMessage({ type: "diagnostics", text: diag });
+    } catch (err) {
+      console.warn("\u751F\u6210\u8BCA\u65AD\u65E5\u5FD7\u5931\u8D25:", err);
+    }
     figma.ui.postMessage({
       type: "status",
       status: `\u5F00\u59CB\u5904\u7406\u5206\u5C42 (\u5171 ${total} \u4E2A\u56FE\u5C42)...`
@@ -14096,6 +14143,7 @@
       }
     }
     if (skipped.length) {
+      figma.ui.postMessage({ type: "diagnostics", text: "## \u5BFC\u51FA\u9636\u6BB5\u8DF3\u8FC7\u7684\u56FE\u5C42\n" + skipped.join("\n") });
       figma.notify(`\u6709 ${skipped.length} \u4E2A\u56FE\u5C42\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u5DF2\u8DF3\u8FC7\uFF1A${skipped.slice(0, 3).join("\u3001")}${skipped.length > 3 ? " \u7B49" : ""}`);
     }
     const payload = {

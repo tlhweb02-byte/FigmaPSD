@@ -192,7 +192,7 @@
 </head>
 <body>
 
-  <h2>🎨 Figma2PSD-Pro (纯文本图层验证版)</h2>
+  <h2>🎨 Figma2PSD-Pro <span style="font-weight:400;color:#888;font-size:11px">v1.5.0</span></h2>
 
   <div id="selection-container">
     <div class="empty-state" id="empty-state">
@@ -232,6 +232,7 @@
 
   <div class="progress-container" id="progress-container">
     <div class="status-text" id="status-text">准备导出...</div>
+    <a href="#" id="diag-link" style="display:none;font-size:11px;">下载诊断日志（导出结果不对时发给开发者）</a>
     <div class="progress-bar">
       <div class="progress-fill" id="progress-fill"></div>
     </div>
@@ -314,8 +315,16 @@
       setTimeout(startNextInBatch, batch.zip ? 0 : 400);
     }
 
+    let diagLog = [];
+    const diagLink = document.getElementById('diag-link');
+    diagLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      downloadBlob(new Blob(['Figma2PSD-Pro v1.5.0\n' + diagLog.join('\n\n')], { type: 'text/plain' }), 'Figma2PSD-诊断日志.txt');
+    });
+
     function finishBatch() {
       const b = batch;
+      diagLink.style.display = diagLog.length ? 'inline' : 'none';
       if (b.zip && b.files.length) {
         const zipName = b.files.length === 1 ? null : `Figma2PSD-${b.files.length}个画板.zip`;
         if (zipName) downloadBlob(buildZip(b.files), zipName);
@@ -366,6 +375,8 @@
           artboardList.innerHTML = '';
           if (!batch) exportBtn.disabled = true;
         }
+      } else if (msg.type === 'diagnostics') {
+        diagLog.push(msg.text);
       } else if (msg.type === 'status') {
         progressContainer.style.display = 'block';
         statusText.textContent = batchPrefix() + msg.status;
@@ -421,6 +432,8 @@
         usedNames: new Set()
       };
       exportBtn.disabled = true;
+      diagLog = [];
+      diagLink.style.display = 'none';
       progressContainer.style.display = 'block';
       startNextInBatch();
     });

@@ -3,7 +3,7 @@
  * 导出主流程：根画板合成图、容器背景离屏渲染、逐图层 PNG 导出、文本属性解析，最后发送给 UI 线程合成 PSD。
  */
 
-import { collectNodes, hasOwnPaint, ParsedNodeItem, RelRect } from './layers';
+import { collectNodes, describeTree, hasOwnPaint, ParsedNodeItem, RelRect } from './layers';
 import { uint8ToBase64 } from './image';
 import { parseTextNode, NativePsdTextData } from './text';
 import { ExportLayerPayload, ExportDataPayload, PixelRect } from './psd-builder';
@@ -244,6 +244,20 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
 
   const total = nodeList.length;
   const skipped: string[] = [];
+
+  // 诊断日志：插件实际读到的节点树 + 整理后的图层列表（UI 中可下载，用于排查问题）
+  try {
+    const diag = [
+      `# 画板「${targetNode.name}」 id=${targetNode.id} 倍率=${scale} 模式=${exportMode}`,
+      '## 插件读到的节点树',
+      ...describeTree(targetNode),
+      '## 整理后的图层列表',
+      ...nodeList.map(it => `${it.isGroup ? '[组]' : it.isBackground ? '[背景]' : it.kind === 'text' ? '[文字]' : '[图片]'} "${it.name}" id=${it.id} parent=${it.parentId}`)
+    ].join('\n');
+    figma.ui.postMessage({ type: 'diagnostics', text: diag });
+  } catch (err) {
+    console.warn('生成诊断日志失败:', err);
+  }
   figma.ui.postMessage({
     type: 'status',
     status: `开始处理分层 (共 ${total} 个图层)...`
@@ -385,6 +399,7 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
   }
 
   if (skipped.length) {
+    figma.ui.postMessage({ type: 'diagnostics', text: '## 导出阶段跳过的图层\n' + skipped.join('\n') });
     figma.notify(`有 ${skipped.length} 个图层无法读取，已跳过：${skipped.slice(0, 3).join('、')}${skipped.length > 3 ? ' 等' : ''}`);
   }
 

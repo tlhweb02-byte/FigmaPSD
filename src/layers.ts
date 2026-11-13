@@ -69,7 +69,47 @@ export const MERGE_SUFFIX = '-合并';
  */
 function isContainerType(node: SceneNode): boolean {
   if (node.type === 'BOOLEAN_OPERATION') return false;
-  return 'children' in node && Array.isArray((node as ChildrenMixin).children);
+  if (!('children' in node)) return false;
+  // 不用 Array.isArray：只要是带 length 的列表即可（不同运行环境下 children 的具体类型可能不同）
+  const children = (node as ChildrenMixin).children as unknown;
+  return children != null && typeof (children as { length?: unknown }).length === 'number';
+}
+
+/**
+ * 诊断：按插件在 Figma 中实际读到的样子输出节点树（每个属性单独容错）。
+ * 用于排查"接口里结构正常、插件里读不到/被合并"的问题。
+ */
+export function describeTree(node: SceneNode, depth: number = 0, lines: string[] = []): string[] {
+  const read = (fn: () => unknown): string => {
+    try { return String(fn()); } catch (e: any) { return '<<错误: ' + (e && e.message ? e.message : e) + '>>'; }
+  };
+  const n = node as any;
+  let kids: any = null;
+  let kidsInfo = '无children属性';
+  try {
+    if ('children' in n) {
+      kids = n.children;
+      kidsInfo = `children: isArray=${Array.isArray(kids)} length=${kids == null ? 'null' : kids.length}`;
+    }
+  } catch (e: any) {
+    kidsInfo = '<<读取children出错: ' + (e && e.message ? e.message : e) + '>>';
+  }
+  lines.push(
+    '  '.repeat(depth) +
+    `${read(() => n.type)} "${read(() => n.name)}" id=${read(() => n.id)} visible=${read(() => n.visible)} ` +
+    `removed=${read(() => n.removed)} isMask=${read(() => n.isMask)} ` +
+    `box=${read(() => JSON.stringify(n.absoluteBoundingBox))} render=${read(() => JSON.stringify(n.absoluteRenderBounds))} ${kidsInfo}`
+  );
+  if (kids && typeof kids.length === 'number' && depth < 12) {
+    for (let i = 0; i < kids.length; i++) {
+      try {
+        describeTree(kids[i], depth + 1, lines);
+      } catch (e: any) {
+        lines.push('  '.repeat(depth + 1) + `<<第 ${i} 个子节点无法读取: ${e && e.message ? e.message : e}>>`);
+      }
+    }
+  }
+  return lines;
 }
 
 /** 容器自身是否有可见的填充或描边（展开为组时需要单独输出背景图层） */
