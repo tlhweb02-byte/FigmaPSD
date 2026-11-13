@@ -243,6 +243,7 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
   collectNodes(targetNode, targetNode, rootBounds, nodeList, exportMode, null);
 
   const total = nodeList.length;
+  const skipped: string[] = [];
   figma.ui.postMessage({
     type: 'status',
     status: `开始处理分层 (共 ${total} 个图层)...`
@@ -258,6 +259,8 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
       layerName: item.name
     });
 
+    // 单个图层出错（如实例里已失效的子图层）只跳过该图层，不中断整个画板
+    try {
     const common = {
       id: item.id,
       name: item.name,
@@ -375,6 +378,14 @@ export async function handleExportPSD(nodeId: string, scale: number = 1, exportM
         console.warn(`图层 ${item.name} 导出失败:`, err);
       }
     }
+    } catch (err) {
+      skipped.push(item.name);
+      console.warn(`图层 ${item.name} 处理失败，已跳过:`, err);
+    }
+  }
+
+  if (skipped.length) {
+    figma.notify(`有 ${skipped.length} 个图层无法读取，已跳过：${skipped.slice(0, 3).join('、')}${skipped.length > 3 ? ' 等' : ''}`);
   }
 
   const payload: ExportDataPayload = {

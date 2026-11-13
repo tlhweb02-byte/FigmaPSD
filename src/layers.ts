@@ -235,11 +235,28 @@ function collectChildren(
   let currentClip = clip;
 
   for (const child of children) {
+    // 实例/插槽里偶尔会列出已失效的子图层（Figma 报 "node ... does not exist"），
+    // 读它的任何属性都会抛异常。跳过这一个图层，不让整个画板导出失败。
+    const before = result.length;
+    try {
+      if (child.removed) continue;
+      if (collectChild(child)) continue;
+      collectNodes(child, rootNode, rootBounds, result, exportMode, currentParent, currentClip);
+    } catch (err) {
+      result.length = before; // 撤销该图层已写入的半成品条目
+      let label = '(未知图层)';
+      try { label = child.id; } catch (e) { /* 连 id 都读不到 */ }
+      console.warn(`跳过失效图层 ${label}:`, err);
+    }
+  }
+
+  /** 处理蒙版节点；返回 true 表示已处理（或应跳过），false 表示是普通图层 */
+  function collectChild(child: SceneNode): boolean {
     if ('isMask' in child && (child as BlendMixin).isMask) {
-      if (!child.visible) continue;
+      if (!child.visible) return true;
       const bounds = child.absoluteBoundingBox;
       const renderBounds = (child as any).absoluteRenderBounds as Rect | null;
-      if (!bounds || !renderBounds) continue;
+      if (!bounds || !renderBounds) return true;
       const rel = toRel(bounds, rootBounds);
       const relRender = toRel(renderBounds, rootBounds);
       const groupId = child.id + '_maskgroup';
@@ -264,8 +281,8 @@ function collectChildren(
       // 蒙版组已承担了外层裁切，组内图层不再重复裁切
       currentParent = groupId;
       currentClip = null;
-      continue;
+      return true;
     }
-    collectNodes(child, rootNode, rootBounds, result, exportMode, currentParent, currentClip);
+    return false;
   }
 }

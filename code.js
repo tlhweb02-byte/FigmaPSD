@@ -127,11 +127,27 @@
     let currentParent = parentId;
     let currentClip = clip;
     for (const child of children) {
+      const before = result.length;
+      try {
+        if (child.removed) continue;
+        if (collectChild(child)) continue;
+        collectNodes(child, rootNode, rootBounds, result, exportMode, currentParent, currentClip);
+      } catch (err) {
+        result.length = before;
+        let label = "(\u672A\u77E5\u56FE\u5C42)";
+        try {
+          label = child.id;
+        } catch (e) {
+        }
+        console.warn(`\u8DF3\u8FC7\u5931\u6548\u56FE\u5C42 ${label}:`, err);
+      }
+    }
+    function collectChild(child) {
       if ("isMask" in child && child.isMask) {
-        if (!child.visible) continue;
+        if (!child.visible) return true;
         const bounds = child.absoluteBoundingBox;
         const renderBounds = child.absoluteRenderBounds;
-        if (!bounds || !renderBounds) continue;
+        if (!bounds || !renderBounds) return true;
         const rel = toRel(bounds, rootBounds);
         const relRender = toRel(renderBounds, rootBounds);
         const groupId = child.id + "_maskgroup";
@@ -155,9 +171,9 @@
         });
         currentParent = groupId;
         currentClip = null;
-        continue;
+        return true;
       }
-      collectNodes(child, rootNode, rootBounds, result, exportMode, currentParent, currentClip);
+      return false;
     }
   }
 
@@ -13956,6 +13972,7 @@
     const nodeList = [];
     collectNodes(targetNode, targetNode, rootBounds, nodeList, exportMode, null);
     const total = nodeList.length;
+    const skipped = [];
     figma.ui.postMessage({
       type: "status",
       status: `\u5F00\u59CB\u5904\u7406\u5206\u5C42 (\u5171 ${total} \u4E2A\u56FE\u5C42)...`
@@ -13968,110 +13985,118 @@
         total,
         layerName: item.name
       });
-      const common = {
-        id: item.id,
-        name: item.name,
-        visible: item.visible,
-        opacity: item.opacity !== void 0 ? item.opacity : 1,
-        width: Math.round(item.width * scale),
-        height: Math.round(item.height * scale),
-        parentId: item.parentId,
-        clip: scaleRect(item.clip, scale)
-      };
-      if (item.isGroup) {
-        const groupLayer = {
-          ...common,
-          kind: "group",
-          isGroup: true,
-          blendMode: item.maskNode ? "pass through" : convertBlendMode(getNodeBlendMode(item.node), true),
-          x: Math.round(item.x * scale),
-          y: Math.round(item.y * scale)
+      try {
+        const common = {
+          id: item.id,
+          name: item.name,
+          visible: item.visible,
+          opacity: item.opacity !== void 0 ? item.opacity : 1,
+          width: Math.round(item.width * scale),
+          height: Math.round(item.height * scale),
+          parentId: item.parentId,
+          clip: scaleRect(item.clip, scale)
         };
-        if (item.maskNode) {
+        if (item.isGroup) {
+          const groupLayer = {
+            ...common,
+            kind: "group",
+            isGroup: true,
+            blendMode: item.maskNode ? "pass through" : convertBlendMode(getNodeBlendMode(item.node), true),
+            x: Math.round(item.x * scale),
+            y: Math.round(item.y * scale)
+          };
+          if (item.maskNode) {
+            try {
+              const maskBytes = await item.maskNode.exportAsync({
+                format: "PNG",
+                constraint: { type: "SCALE", value: scale }
+              });
+              groupLayer.maskPngBase64 = uint8ToBase64(maskBytes);
+              groupLayer.maskX = Math.round(item.renderX * scale);
+              groupLayer.maskY = Math.round(item.renderY * scale);
+              groupLayer.maskLuminance = "maskType" in item.maskNode && item.maskNode.maskType === "LUMINANCE";
+            } catch (err) {
+              console.warn(`\u8499\u7248 ${item.name} \u5BFC\u51FA\u5931\u8D25:`, err);
+            }
+          }
+          exportLayers.push(groupLayer);
+        } else if (item.isBackground) {
+          const bg = await renderContainerBackground(item.node, scale);
+          if (bg) {
+            exportLayers.push({
+              ...common,
+              kind: "image",
+              isGroup: false,
+              blendMode: "normal",
+              x: Math.round((item.x + bg.offsetX) * scale),
+              y: Math.round((item.y + bg.offsetY) * scale),
+              pngBase64: uint8ToBase64(bg.bytes)
+            });
+          }
+        } else if (item.kind === "text") {
+          const layout = await measureTextLayout(item.node);
+          let textData = null;
           try {
-            const maskBytes = await item.maskNode.exportAsync({
+            textData = await parseTextNode(item.node, scale, item.name, layout ? layout.lines : void 0);
+            if (textData && layout) {
+              textData.baselineY = Math.round((item.y + layout.baselineOffset) * scale * 100) / 100;
+            }
+          } catch (fontErr) {
+            console.warn(`\u6587\u672C\u5C5E\u6027\u89E3\u6790\u5F02\u5E38:`, fontErr);
+          }
+          let textPngBase64 = void 0;
+          try {
+            const pngBytes = await item.node.exportAsync({
               format: "PNG",
               constraint: { type: "SCALE", value: scale }
             });
-            groupLayer.maskPngBase64 = uint8ToBase64(maskBytes);
-            groupLayer.maskX = Math.round(item.renderX * scale);
-            groupLayer.maskY = Math.round(item.renderY * scale);
-            groupLayer.maskLuminance = "maskType" in item.maskNode && item.maskNode.maskType === "LUMINANCE";
-          } catch (err) {
-            console.warn(`\u8499\u7248 ${item.name} \u5BFC\u51FA\u5931\u8D25:`, err);
+            textPngBase64 = uint8ToBase64(pngBytes);
+          } catch (pngErr) {
+            console.warn(`\u6587\u672C\u56FE\u5C42 ${item.name} PNG \u5BFC\u51FA\u5931\u8D25\uFF08\u4ECD\u4FDD\u7559\u53EF\u7F16\u8F91\u6587\u672C\uFF09:`, pngErr);
           }
-        }
-        exportLayers.push(groupLayer);
-      } else if (item.isBackground) {
-        const bg = await renderContainerBackground(item.node, scale);
-        if (bg) {
           exportLayers.push({
             ...common,
-            kind: "image",
+            kind: "text",
             isGroup: false,
-            blendMode: "normal",
-            x: Math.round((item.x + bg.offsetX) * scale),
-            y: Math.round((item.y + bg.offsetY) * scale),
-            pngBase64: uint8ToBase64(bg.bytes)
-          });
-        }
-      } else if (item.kind === "text") {
-        const layout = await measureTextLayout(item.node);
-        let textData = null;
-        try {
-          textData = await parseTextNode(item.node, scale, item.name, layout ? layout.lines : void 0);
-          if (textData && layout) {
-            textData.baselineY = Math.round((item.y + layout.baselineOffset) * scale * 100) / 100;
-          }
-        } catch (fontErr) {
-          console.warn(`\u6587\u672C\u5C5E\u6027\u89E3\u6790\u5F02\u5E38:`, fontErr);
-        }
-        let textPngBase64 = void 0;
-        try {
-          const pngBytes = await item.node.exportAsync({
-            format: "PNG",
-            constraint: { type: "SCALE", value: scale }
-          });
-          textPngBase64 = uint8ToBase64(pngBytes);
-        } catch (pngErr) {
-          console.warn(`\u6587\u672C\u56FE\u5C42 ${item.name} PNG \u5BFC\u51FA\u5931\u8D25\uFF08\u4ECD\u4FDD\u7559\u53EF\u7F16\u8F91\u6587\u672C\uFF09:`, pngErr);
-        }
-        exportLayers.push({
-          ...common,
-          kind: "text",
-          isGroup: false,
-          textData,
-          blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
-          x: Math.round(item.x * scale),
-          y: Math.round(item.y * scale),
-          renderX: Math.round(item.renderX * scale),
-          renderY: Math.round(item.renderY * scale),
-          textBox: preciseRect(item.x, item.y, item.width, item.height, scale),
-          glyphBox: (() => {
-            const rb = item.node.absoluteRenderBounds;
-            return rb ? preciseRect(rb.x - rootBounds.x, rb.y - rootBounds.y, rb.width, rb.height, scale) : void 0;
-          })(),
-          pngBase64: textPngBase64
-        });
-      } else {
-        try {
-          const pngBytes = await item.node.exportAsync({
-            format: "PNG",
-            constraint: { type: "SCALE", value: scale }
-          });
-          exportLayers.push({
-            ...common,
-            kind: item.kind,
-            isGroup: false,
+            textData,
             blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
-            x: Math.round(item.renderX * scale),
-            y: Math.round(item.renderY * scale),
-            pngBase64: uint8ToBase64(pngBytes)
+            x: Math.round(item.x * scale),
+            y: Math.round(item.y * scale),
+            renderX: Math.round(item.renderX * scale),
+            renderY: Math.round(item.renderY * scale),
+            textBox: preciseRect(item.x, item.y, item.width, item.height, scale),
+            glyphBox: (() => {
+              const rb = item.node.absoluteRenderBounds;
+              return rb ? preciseRect(rb.x - rootBounds.x, rb.y - rootBounds.y, rb.width, rb.height, scale) : void 0;
+            })(),
+            pngBase64: textPngBase64
           });
-        } catch (err) {
-          console.warn(`\u56FE\u5C42 ${item.name} \u5BFC\u51FA\u5931\u8D25:`, err);
+        } else {
+          try {
+            const pngBytes = await item.node.exportAsync({
+              format: "PNG",
+              constraint: { type: "SCALE", value: scale }
+            });
+            exportLayers.push({
+              ...common,
+              kind: item.kind,
+              isGroup: false,
+              blendMode: convertBlendMode(getNodeBlendMode(item.node), false),
+              x: Math.round(item.renderX * scale),
+              y: Math.round(item.renderY * scale),
+              pngBase64: uint8ToBase64(pngBytes)
+            });
+          } catch (err) {
+            console.warn(`\u56FE\u5C42 ${item.name} \u5BFC\u51FA\u5931\u8D25:`, err);
+          }
         }
+      } catch (err) {
+        skipped.push(item.name);
+        console.warn(`\u56FE\u5C42 ${item.name} \u5904\u7406\u5931\u8D25\uFF0C\u5DF2\u8DF3\u8FC7:`, err);
       }
+    }
+    if (skipped.length) {
+      figma.notify(`\u6709 ${skipped.length} \u4E2A\u56FE\u5C42\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u5DF2\u8DF3\u8FC7\uFF1A${skipped.slice(0, 3).join("\u3001")}${skipped.length > 3 ? " \u7B49" : ""}`);
     }
     const payload = {
       artboardName: targetNode.name,
