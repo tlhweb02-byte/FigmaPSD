@@ -192,7 +192,7 @@
 </head>
 <body>
 
-  <h2>🎨 Figma2PSD-Pro <span style="font-weight:400;color:#888;font-size:11px">v1.5.0</span></h2>
+  <h2>🎨 Figma2PSD-Pro <span style="font-weight:400;color:#888;font-size:11px">v1.5.1</span></h2>
 
   <div id="selection-container">
     <div class="empty-state" id="empty-state">
@@ -319,7 +319,7 @@
     const diagLink = document.getElementById('diag-link');
     diagLink.addEventListener('click', (e) => {
       e.preventDefault();
-      downloadBlob(new Blob(['Figma2PSD-Pro v1.5.0\n' + diagLog.join('\n\n')], { type: 'text/plain' }), 'Figma2PSD-诊断日志.txt');
+      downloadBlob(new Blob(['Figma2PSD-Pro v1.5.1\n' + diagLog.join('\n\n')], { type: 'text/plain' }), 'Figma2PSD-诊断日志.txt');
     });
 
     function finishBatch() {
@@ -759,6 +759,8 @@
       let textIndex = 0; // TySh TextIndex：PS 原生文件中每个文字图层依次编号，不能全部为 0
 
       for (const layer of layers) {
+        // 同一 id 只处理一次：重复 id 会顶掉已有的组，使组内图层全部丢失
+        if (layerMap.has(layer.id)) { console.warn('跳过重复 id 的图层:', layer.name, layer.id); continue; }
         if (layer.isGroup) {
           const groupObj = {
             name: layer.name,

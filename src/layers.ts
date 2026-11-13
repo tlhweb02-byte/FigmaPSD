@@ -76,6 +76,27 @@ function isContainerType(node: SceneNode): boolean {
 }
 
 /**
+ * 容器的子节点是否"读不对"。Figma 对插槽里嵌套的图层有缺陷：
+ *   - 有时读属性直接报 "node ... does not exist"；
+ *   - 有时返回的句柄其实指向别的节点（实测指向了外层的组件实例本身：id、名称、尺寸都是实例的）。
+ * 判断依据：真正的子节点，其 parent 一定是这个容器。
+ * 出现这种情况时无法单独导出子图层，调用方改为把该容器整体导出为一张图片（内容不丢）。
+ */
+export function hasBrokenChildren(node: SceneNode): boolean {
+  try {
+    const children = (node as unknown as ChildrenMixin).children;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (child.removed) return true;
+      if (!child.parent || child.parent.id !== node.id) return true;
+    }
+    return false;
+  } catch (err) {
+    return true;
+  }
+}
+
+/**
  * 诊断：按插件在 Figma 中实际读到的样子输出节点树（每个属性单独容错）。
  * 用于排查"接口里结构正常、插件里读不到/被合并"的问题。
  */
@@ -97,7 +118,7 @@ export function describeTree(node: SceneNode, depth: number = 0, lines: string[]
   lines.push(
     '  '.repeat(depth) +
     `${read(() => n.type)} "${read(() => n.name)}" id=${read(() => n.id)} visible=${read(() => n.visible)} ` +
-    `removed=${read(() => n.removed)} isMask=${read(() => n.isMask)} ` +
+    `removed=${read(() => n.removed)} isMask=${read(() => n.isMask)} parent=${read(() => n.parent && n.parent.id)} ` +
     `box=${read(() => JSON.stringify(n.absoluteBoundingBox))} render=${read(() => JSON.stringify(n.absoluteRenderBounds))} ${kidsInfo}`
   );
   if (kids && typeof kids.length === 'number' && depth < 12) {
@@ -185,7 +206,10 @@ export function collectNodes(
     typeof node.name === 'string' && node.name.endsWith(MERGE_SUFFIX);
   const layerName = wantsMerge ? node.name.slice(0, -MERGE_SUFFIX.length) : node.name;
 
-  const expand = isContainerType(node) && !wantsMerge && 'children' in node;
+  // 子图层读不对（Figma 插槽缺陷）时不展开，整体导出为一张图片
+  const broken = isContainerType(node) && !wantsMerge && hasBrokenChildren(node);
+  if (broken) console.warn(`「${node.name}」的子图层无法正确读取（Figma 插槽限制），已整体导出为一张图片`);
+  const expand = isContainerType(node) && !wantsMerge && !broken && 'children' in node;
   const base = {
     visible: node.visible,
     x: rel.x,

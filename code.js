@@ -23,6 +23,19 @@
     const children = node.children;
     return children != null && typeof children.length === "number";
   }
+  function hasBrokenChildren(node) {
+    try {
+      const children = node.children;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (child.removed) return true;
+        if (!child.parent || child.parent.id !== node.id) return true;
+      }
+      return false;
+    } catch (err) {
+      return true;
+    }
+  }
   function describeTree(node, depth = 0, lines = []) {
     const read = (fn) => {
       try {
@@ -43,7 +56,7 @@
       kidsInfo = "<<\u8BFB\u53D6children\u51FA\u9519: " + (e && e.message ? e.message : e) + ">>";
     }
     lines.push(
-      "  ".repeat(depth) + `${read(() => n.type)} "${read(() => n.name)}" id=${read(() => n.id)} visible=${read(() => n.visible)} removed=${read(() => n.removed)} isMask=${read(() => n.isMask)} box=${read(() => JSON.stringify(n.absoluteBoundingBox))} render=${read(() => JSON.stringify(n.absoluteRenderBounds))} ${kidsInfo}`
+      "  ".repeat(depth) + `${read(() => n.type)} "${read(() => n.name)}" id=${read(() => n.id)} visible=${read(() => n.visible)} removed=${read(() => n.removed)} isMask=${read(() => n.isMask)} parent=${read(() => n.parent && n.parent.id)} box=${read(() => JSON.stringify(n.absoluteBoundingBox))} render=${read(() => JSON.stringify(n.absoluteRenderBounds))} ${kidsInfo}`
     );
     if (kids && typeof kids.length === "number" && depth < 12) {
       for (let i = 0; i < kids.length; i++) {
@@ -97,7 +110,9 @@
     }
     const wantsMerge = isContainerType(node) && typeof node.name === "string" && node.name.endsWith(MERGE_SUFFIX);
     const layerName = wantsMerge ? node.name.slice(0, -MERGE_SUFFIX.length) : node.name;
-    const expand = isContainerType(node) && !wantsMerge && "children" in node;
+    const broken = isContainerType(node) && !wantsMerge && hasBrokenChildren(node);
+    if (broken) console.warn(`\u300C${node.name}\u300D\u7684\u5B50\u56FE\u5C42\u65E0\u6CD5\u6B63\u786E\u8BFB\u53D6\uFF08Figma \u63D2\u69FD\u9650\u5236\uFF09\uFF0C\u5DF2\u6574\u4F53\u5BFC\u51FA\u4E3A\u4E00\u5F20\u56FE\u7247`);
+    const expand = isContainerType(node) && !wantsMerge && !broken && "children" in node;
     const base = {
       visible: node.visible,
       x: rel.x,
